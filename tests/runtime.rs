@@ -253,7 +253,8 @@ fn parameter_overrides_can_be_applied_after_parameter_reset() {
 fn motion_player_drives_a_parameter_over_time() {
     let mut model = load_model_runtime("assets/models/Haru/Haru.model3.json").unwrap();
     let motion =
-        neocari::motion::load_motion("assets/models/Haru/motions/haru_g_idle.motion3.json").unwrap();
+        neocari::motion::load_motion("assets/models/Haru/motions/haru_g_idle.motion3.json")
+            .unwrap();
 
     let target = motion
         .curves()

@@ -622,10 +622,19 @@ enum DeformerTransform {
 impl DeformerTransform {
     fn transform_point(&self, point: [f32; 2]) -> Result<[f32; 2], Moc2Error> {
         let output = match self {
-            Self::Warp { rows, columns, grid, .. } => {
-                map_warp_grid(point, grid, *rows, *columns)?
-            }
-            Self::Rotation { origin, angle_degrees, total_scale, reflect, .. } => {
+            Self::Warp {
+                rows,
+                columns,
+                grid,
+                ..
+            } => map_warp_grid(point, grid, *rows, *columns)?,
+            Self::Rotation {
+                origin,
+                angle_degrees,
+                total_scale,
+                reflect,
+                ..
+            } => {
                 let radians = angle_degrees.to_radians();
                 let (sin, cos) = radians.sin_cos();
                 let sx = total_scale * if reflect[0] { -1.0 } else { 1.0 };
@@ -639,7 +648,9 @@ impl DeformerTransform {
         if output.iter().all(|value| value.is_finite()) {
             Ok(output)
         } else {
-            Err(Moc2Error::InvalidData("deformer generated a non-finite position"))
+            Err(Moc2Error::InvalidData(
+                "deformer generated a non-finite position",
+            ))
         }
     }
     fn total_scale(&self) -> f32 {
@@ -649,7 +660,9 @@ impl DeformerTransform {
     }
     fn total_opacity(&self) -> f32 {
         match self {
-            Self::Warp { total_opacity, .. } | Self::Rotation { total_opacity, .. } => *total_opacity,
+            Self::Warp { total_opacity, .. } | Self::Rotation { total_opacity, .. } => {
+                *total_opacity
+            }
         }
     }
     fn is_rotation(&self) -> bool {
@@ -668,15 +681,18 @@ fn evaluate_deformer_transform(
         return Ok(());
     }
     if depth > 32 {
-        return Err(Moc2Error::InvalidData("deformer chain is cyclic or too deep"));
+        return Err(Moc2Error::InvalidData(
+            "deformer chain is cyclic or too deep",
+        ));
     }
     let object = deformers.get(id).ok_or(Moc2Error::InvalidData(
         "drawable references a missing deformer",
     ))?;
     let parent_id = match object.as_ref() {
-        Object::Warp { target, .. } | Object::Rotation { target, .. } => {
-            target.as_deref().filter(|target| *target != "DST_BASE").map(str::to_owned)
-        }
+        Object::Warp { target, .. } | Object::Rotation { target, .. } => target
+            .as_deref()
+            .filter(|target| *target != "DST_BASE")
+            .map(str::to_owned),
         _ => return Err(Moc2Error::InvalidData("unknown deformer type")),
     };
     if let Some(parent_id) = parent_id.as_deref() {
@@ -685,24 +701,37 @@ fn evaluate_deformer_transform(
     let parent = parent_id
         .as_deref()
         .map(|parent_id| {
-            transforms.get(parent_id).cloned().ok_or(Moc2Error::InvalidData(
-                "missing parent deformer transform",
-            ))
+            transforms
+                .get(parent_id)
+                .cloned()
+                .ok_or(Moc2Error::InvalidData("missing parent deformer transform"))
         })
         .transpose()?;
     let opacity = match object.as_ref() {
-        Object::Warp { pivots, opacities, .. } | Object::Rotation { pivots, opacities, .. } => {
-            opacities
-                .as_ref()
-                .map(|values| interpolate_scalar_float(values, pivots, defaults))
-                .transpose()?
-                .unwrap_or(1.0)
+        Object::Warp {
+            pivots, opacities, ..
         }
+        | Object::Rotation {
+            pivots, opacities, ..
+        } => opacities
+            .as_ref()
+            .map(|values| interpolate_scalar_float(values, pivots, defaults))
+            .transpose()?
+            .unwrap_or(1.0),
         _ => unreachable!(),
     };
-    let total_opacity = parent.as_ref().map_or(1.0, DeformerTransform::total_opacity) * opacity;
+    let total_opacity = parent
+        .as_ref()
+        .map_or(1.0, DeformerTransform::total_opacity)
+        * opacity;
     let transform = match object.as_ref() {
-        Object::Warp { columns, rows, pivots, positions, .. } => {
+        Object::Warp {
+            columns,
+            rows,
+            pivots,
+            positions,
+            ..
+        } => {
             if *rows == 0 || *columns == 0 {
                 return Err(Moc2Error::InvalidData("empty warp grid"));
             }
@@ -711,7 +740,7 @@ fn evaluate_deformer_transform(
                 return Err(Moc2Error::InvalidData("invalid warp grid length"));
             }
             if let Some(parent) = parent.as_ref() {
-                for coordinate in grid.chunks_exact_mut(2) {
+                for coordinate in grid.as_chunks_mut::<2>().0 {
                     let transformed = parent.transform_point([coordinate[0], coordinate[1]])?;
                     coordinate.copy_from_slice(&transformed);
                 }
@@ -724,15 +753,15 @@ fn evaluate_deformer_transform(
                 total_opacity,
             }
         }
-        Object::Rotation { pivots, affines, .. } => {
+        Object::Rotation {
+            pivots, affines, ..
+        } => {
             let (a, reflect) = affine_values(affines, pivots, defaults)?;
             let (origin, angle_degrees, total_scale) = if let Some(parent) = parent.as_ref() {
                 let origin = parent.transform_point([a[0], a[1]])?;
                 let direction = [0.0, if parent.is_rotation() { -10.0 } else { -0.1 }];
-                let transformed_direction_point = parent.transform_point([
-                    a[0] + direction[0],
-                    a[1] + direction[1],
-                ])?;
+                let transformed_direction_point =
+                    parent.transform_point([a[0] + direction[0], a[1] + direction[1]])?;
                 let transformed_direction = [
                     transformed_direction_point[0] - origin[0],
                     transformed_direction_point[1] - origin[1],

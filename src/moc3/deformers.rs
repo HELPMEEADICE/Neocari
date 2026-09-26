@@ -598,8 +598,10 @@ impl Moc3Deformers {
 
         Some(
             values
-                .chunks_exact(2)
-                .map(|xy| Vector2::new(xy[0], xy[1]))
+                .as_chunks::<2>()
+                .0
+                .iter()
+                .map(|[x, y]| Vector2::new(*x, *y))
                 .collect(),
         )
     }

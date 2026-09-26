@@ -5,7 +5,7 @@
 //! format version.
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-/// Error type used by Mocari parsers and mesh-building helpers.
+/// Error type used by Neocari parsers and mesh-building helpers.
 pub enum Error {
     /// An id string was empty where Cubism data requires a named item.
     #[error("id cannot be empty")]
@@ -34,5 +34,5 @@ pub enum Error {
     },
 }
 
-/// Result alias used by lower-level Mocari APIs.
+/// Result alias used by lower-level Neocari APIs.
 pub type Result<T> = std::result::Result<T, Error>;

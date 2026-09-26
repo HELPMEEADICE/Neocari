@@ -74,6 +74,10 @@ pub fn live2d_blend_state(blend_mode: Moc3DrawableBlendMode) -> wgpu::BlendState
             (wgpu::BlendFactor::Dst, wgpu::BlendFactor::OneMinusSrcAlpha),
             (wgpu::BlendFactor::Zero, wgpu::BlendFactor::One),
         ),
+        Moc3DrawableBlendMode::Screen => blend_state(
+            (wgpu::BlendFactor::One, wgpu::BlendFactor::OneMinusSrc),
+            (wgpu::BlendFactor::One, wgpu::BlendFactor::OneMinusSrcAlpha),
+        ),
     }
 }
 
@@ -223,6 +227,14 @@ impl WgpuLive2dRenderer {
             Moc3DrawableBlendMode::Multiplicative,
             "live2d.pipeline.multiplicative",
         );
+        let screen_pipeline = create_live2d_pipeline(
+            device,
+            &pipeline_layout,
+            &shader,
+            color_format,
+            Moc3DrawableBlendMode::Screen,
+            "live2d.pipeline.screen",
+        );
         let mask_bind_group_layouts = [
             Some(&texture_bind_group_layout),
             Some(&transform_bind_group_layout),
@@ -275,6 +287,14 @@ impl WgpuLive2dRenderer {
             Moc3DrawableBlendMode::Multiplicative,
             "live2d.masked.pipeline.multiplicative",
         );
+        let masked_screen_pipeline = create_live2d_pipeline(
+            device,
+            &masked_pipeline_layout,
+            &masked_shader,
+            color_format,
+            Moc3DrawableBlendMode::Screen,
+            "live2d.masked.pipeline.screen",
+        );
         let identity_transform =
             create_wgpu_transform(device, &transform_bind_group_layout, &Matrix44::identity());
 
@@ -282,10 +302,12 @@ impl WgpuLive2dRenderer {
             normal_pipeline,
             additive_pipeline,
             multiplicative_pipeline,
+            screen_pipeline,
             mask_pipeline,
             masked_normal_pipeline,
             masked_additive_pipeline,
             masked_multiplicative_pipeline,
+            masked_screen_pipeline,
             texture_bind_group_layout,
             transform_bind_group_layout,
             mask_params_bind_group_layout,
@@ -307,6 +329,7 @@ impl WgpuLive2dRenderer {
             Moc3DrawableBlendMode::Normal => &self.normal_pipeline,
             Moc3DrawableBlendMode::Additive => &self.additive_pipeline,
             Moc3DrawableBlendMode::Multiplicative => &self.multiplicative_pipeline,
+            Moc3DrawableBlendMode::Screen => &self.screen_pipeline,
         }
     }
 
@@ -322,6 +345,7 @@ impl WgpuLive2dRenderer {
             Moc3DrawableBlendMode::Normal => &self.masked_normal_pipeline,
             Moc3DrawableBlendMode::Additive => &self.masked_additive_pipeline,
             Moc3DrawableBlendMode::Multiplicative => &self.masked_multiplicative_pipeline,
+            Moc3DrawableBlendMode::Screen => &self.masked_screen_pipeline,
         }
     }
 

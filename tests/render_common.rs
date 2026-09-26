@@ -1,5 +1,5 @@
-use mocari::moc3::{Moc3DrawableMesh, Moc3DrawableVertex};
-use mocari::render::common::{
+use neocari::moc3::{Moc3DrawableMesh, Moc3DrawableVertex};
+use neocari::render::common::{
     ClippingLayoutError, ClippingPlan, ClippingRect, DrawableInfo, MaskChannel, draw_order_indices,
     encode_indices, encode_vertices, encode_vertices_from_drawable, vertices_from_drawable,
 };

@@ -1,5 +1,5 @@
 mod ids {
-    use mocari::{DrawableId, Error, Id, ParameterId, PartId};
+    use neocari::{DrawableId, Error, Id, ParameterId, PartId};
 
     #[test]
     fn id_rejects_empty_strings() {
@@ -27,7 +27,7 @@ mod ids {
 }
 
 mod core_parameters {
-    use mocari::core::{clamp_parameter_value, core_repeat_fold, parameter_dirty};
+    use neocari::core::{clamp_parameter_value, core_repeat_fold, parameter_dirty};
 
     fn assert_close(actual: f32, expected: f32) {
         assert!(
@@ -69,7 +69,7 @@ mod core_parameters {
 mod math {
     use std::collections::BTreeMap;
 
-    use mocari::core::{Matrix44, ModelMatrix};
+    use neocari::core::{Matrix44, ModelMatrix};
 
     #[test]
     fn matrix44_transforms_scaled_and_translated_points() {
@@ -109,7 +109,7 @@ mod math {
 }
 
 mod core_blend {
-    use mocari::core::{
+    use neocari::core::{
         BlendSlot, Rgb, blend_scalar_slots, blend_scalar_slots_clamped, multiply_rgb, screen_rgb,
     };
 
@@ -170,7 +170,7 @@ mod core_blend {
 }
 
 mod core_keyforms {
-    use mocari::core::{KeyformAxis, compute_keyform_axis_interval, expand_keyform_runtime_slots};
+    use neocari::core::{KeyformAxis, compute_keyform_axis_interval, expand_keyform_runtime_slots};
 
     fn assert_close(actual: f32, expected: f32) {
         assert!(
@@ -221,7 +221,7 @@ mod core_keyforms {
 }
 
 mod core_update_order {
-    use mocari::core::{
+    use neocari::core::{
         ModelUpdateStep, semantic_model_update_order, should_affect_glues, should_blend_glues,
         should_run_offscreen_stage,
     };
@@ -268,7 +268,7 @@ mod core_update_order {
 }
 
 mod core_art_mesh {
-    use mocari::core::{
+    use neocari::core::{
         Vector2, affect_art_mesh_pair, apply_art_mesh_blend_shape_delta, apply_parent_part_opacity,
         draw_order_from_raw, reverse_coordinate_y,
     };

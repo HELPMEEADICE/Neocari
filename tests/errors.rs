@@ -1,6 +1,6 @@
 use std::error::Error as StdError;
 
-use mocari::{
+use neocari::{
     Error, assets::AssetLoadError, expression::ExpressionLoadError, motion::MotionLoadError,
 };
 

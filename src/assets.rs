@@ -5,6 +5,8 @@
 //! when the application needs per-frame parameter, motion, or expression updates.
 //! Use [`crate::assets::load_model`] for a static default-pose snapshot.
 
+use serde::Deserialize;
+
 use std::{
     fs,
     path::{Path, PathBuf},
@@ -13,6 +15,7 @@ use std::{
 
 use crate::{
     json::{Model3, Physics3, Pose3},
+    moc2::{Moc2Error, Moc2Model},
     moc3::{
         Moc3ArtMeshKeyforms, Moc3ArtMeshes, Moc3CanvasInfo, Moc3Deformers, Moc3DrawOrderGroups,
         Moc3DrawableMesh, Moc3Glues, Moc3Ids, Moc3KeyformBindings, Moc3OffscreenInfo, Moc3Parts,
@@ -114,6 +117,12 @@ pub enum AssetLoadError {
     /// The referenced `.moc3` file was invalid or unsupported.
     #[error("failed to parse moc3: {0}")]
     Moc3(#[source] crate::Error),
+    /// A Cubism 2 model settings JSON file was malformed.
+    #[error("failed to parse model2 json: {message}")]
+    Moc2Json { message: String },
+    /// The referenced MOC file was invalid or unsupported.
+    #[error("failed to parse moc2: {0}")]
+    Moc2(#[source] Moc2Error),
     /// A referenced texture could not be decoded.
     #[error("failed to decode {path}: {source}")]
     Image {
@@ -134,9 +143,77 @@ pub enum AssetLoadError {
     DrawableMeshes,
 }
 
+#[derive(Debug, Clone)]
+/// A Cubism 2 model with its decoded textures and default-pose meshes.
+pub struct LoadedMoc2Model {
+    model: Moc2Model,
+    textures: Vec<DecodedTexture>,
+    model_dir: Option<PathBuf>,
+}
+
+impl LoadedMoc2Model {
+    /// Returns parsed MOC2 data and renderer-ready drawables.
+    pub fn model(&self) -> &Moc2Model {
+        &self.model
+    }
+    /// Returns renderer-ready drawables in model order.
+    pub fn drawables(&self) -> &[Moc3DrawableMesh] {
+        self.model.drawables()
+    }
+    /// Alias matching the naming used by the MOC3 loader.
+    pub fn meshes(&self) -> &[Moc3DrawableMesh] {
+        self.model.drawables()
+    }
+    /// Returns decoded RGBA8 textures in manifest order.
+    pub fn textures(&self) -> &[DecodedTexture] {
+        &self.textures
+    }
+    /// Returns the folder containing the model settings JSON.
+    pub fn model_dir(&self) -> Option<&Path> {
+        self.model_dir.as_deref()
+    }
+}
+
+#[derive(Deserialize)]
+struct Model2Manifest {
+    #[serde(alias = "Model")]
+    model: String,
+    #[serde(default, alias = "Textures")]
+    textures: Vec<String>,
+}
+
+/// Loads a Cubism 2 model settings JSON, its referenced MOC file, and textures.
+///
+/// The generated drawables use the model default parameter values and can be
+/// uploaded through the existing wgpu renderer.
+pub fn load_moc2_model(path: impl AsRef<Path>) -> Result<LoadedMoc2Model, AssetLoadError> {
+    let path = path.as_ref();
+    let model_dir = path.parent().ok_or_else(|| AssetLoadError::MissingParent {
+        path: path.display().to_string(),
+    })?;
+    let source = read_text(path)?;
+    let manifest: Model2Manifest =
+        serde_json::from_str(&source).map_err(|error| AssetLoadError::Moc2Json {
+            message: error.to_string(),
+        })?;
+    let moc_path = model_dir.join(manifest.model.replace('\\', "/"));
+    let moc_bytes = read_bytes(&moc_path)?;
+    let model = Moc2Model::from_bytes(&moc_bytes).map_err(AssetLoadError::Moc2)?;
+    let texture_paths = manifest
+        .textures
+        .iter()
+        .map(|path| path.replace('\\', "/"))
+        .collect::<Vec<_>>();
+    let textures = decode_textures(model_dir, &texture_paths)?;
+    Ok(LoadedMoc2Model {
+        model,
+        textures,
+        model_dir: Some(model_dir.to_path_buf()),
+    })
+}
 /// Loads a model as a static default-pose snapshot.
 ///
-/// The `path` should point to a `.model3.json` file. Mocari reads the referenced
+/// The `path` should point to a `.model3.json` file. Neocari reads the referenced
 /// `.moc3` file and textures from the same model directory, then builds drawable
 /// meshes using the model's default parameter values.
 pub fn load_model(path: impl AsRef<Path>) -> Result<DefaultModel, AssetLoadError> {

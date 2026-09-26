@@ -2,7 +2,7 @@
 //!
 //! Most applications interact with these types through [`crate::runtime`] and
 //! [`crate::render`]. They are public so custom loaders, renderers, and tests can
-//! reuse Mocari's interpolation, color blending, physics, and matrix helpers.
+//! reuse Neocari's interpolation, color blending, physics, and matrix helpers.
 
 mod art_mesh;
 mod blend;

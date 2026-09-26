@@ -4,6 +4,7 @@ use super::{Moc3ArtMeshKeyforms, Moc3ArtMeshes};
 
 const DRAWABLE_BLEND_ADDITIVE: u8 = 1 << 0;
 const DRAWABLE_BLEND_MULTIPLICATIVE: u8 = 1 << 1;
+const DRAWABLE_BLEND_SCREEN: u8 = 1 << 2;
 const DRAWABLE_MASK_INVERTED: u8 = 1 << 3;
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -57,6 +58,8 @@ pub enum Moc3DrawableBlendMode {
     Additive,
     /// Multiplicative blending.
     Multiplicative,
+    /// Screen composition used by Cubism 2 drawables.
+    Screen,
 }
 
 impl Moc3DrawableBlendMode {
@@ -66,6 +69,8 @@ impl Moc3DrawableBlendMode {
             Self::Additive
         } else if flags & DRAWABLE_BLEND_MULTIPLICATIVE != 0 {
             Self::Multiplicative
+        } else if flags & DRAWABLE_BLEND_SCREEN != 0 {
+            Self::Screen
         } else {
             Self::Normal
         }

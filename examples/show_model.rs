@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, error::Error, fmt, path::PathBuf, sync::Arc, time::Instant};
 
 use ab_glyph::{Font, FontArc, Glyph, ScaleFont, point};
-use mocari::{
+use neocari::{
     ExpressionManager, ModelRuntime, MotionPlayer,
     assets::{DecodedTexture, load_model_runtime},
     core::Matrix44,

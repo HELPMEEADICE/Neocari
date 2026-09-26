@@ -1,5 +1,5 @@
 mod moc3_header {
-    use mocari::{
+    use neocari::{
         Error,
         moc3::{Endianness, Moc3Header, Moc3Version},
     };
@@ -68,7 +68,7 @@ mod moc3_header {
 }
 
 mod moc3_canvas {
-    use mocari::{Error, moc3::Moc3CanvasInfo};
+    use neocari::{Error, moc3::Moc3CanvasInfo};
 
     #[test]
     fn parses_moc3_canvas_info() {
@@ -116,7 +116,7 @@ mod moc3_canvas {
 }
 
 mod moc3_counts {
-    use mocari::{Error, moc3::Moc3CountInfo};
+    use neocari::{Error, moc3::Moc3CountInfo};
 
     #[test]
     fn parses_basic_moc3_count_info() {
@@ -170,7 +170,7 @@ mod moc3_counts {
 }
 
 mod moc3_glues {
-    use mocari::moc3::{Moc3CountInfo, Moc3Glues};
+    use neocari::moc3::{Moc3CountInfo, Moc3Glues};
 
     #[test]
     fn parses_glue_sections_from_real_v5_models() {
@@ -191,7 +191,7 @@ mod moc3_glues {
 }
 
 mod moc3_ids {
-    use mocari::{Error, moc3::Moc3Ids};
+    use neocari::{Error, moc3::Moc3Ids};
 
     #[test]
     fn parses_moc3_fixed_width_id_sections() {
@@ -249,7 +249,7 @@ mod moc3_ids {
 }
 
 mod moc3_offsets {
-    use mocari::{Error, moc3::Moc3SectionOffsets};
+    use neocari::{Error, moc3::Moc3SectionOffsets};
 
     #[test]
     fn parses_confirmed_moc3_section_offsets() {

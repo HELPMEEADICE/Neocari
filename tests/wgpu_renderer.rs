@@ -1,4 +1,4 @@
-use mocari::{
+use neocari::{
     core::Matrix44,
     moc3::{Moc3DrawableBlendMode, Moc3DrawableMesh, Moc3DrawableVertex},
     render::wgpu::{
@@ -114,7 +114,7 @@ fn encodes_wgpu_transform_matrix() {
 
 #[test]
 fn encodes_mask_params_from_layout_channel_and_bounds() {
-    let layout = mocari::render::wgpu::WgpuClippingLayout::new(
+    let layout = neocari::render::wgpu::WgpuClippingLayout::new(
         WgpuMaskChannel::Green,
         WgpuClippingRect::new(0.5, 0.0, 0.5, 1.0),
     );
@@ -136,7 +136,7 @@ fn encodes_mask_params_from_layout_channel_and_bounds() {
 fn creates_mask_params_bind_group() {
     let (device, _queue) = wgpu::Device::noop(&wgpu::DeviceDescriptor::default());
     let renderer = WgpuLive2dRenderer::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
-    let layout = mocari::render::wgpu::WgpuClippingLayout::new(
+    let layout = neocari::render::wgpu::WgpuClippingLayout::new(
         WgpuMaskChannel::Red,
         WgpuClippingRect::new(0.0, 0.0, 1.0, 1.0),
     );
@@ -152,11 +152,11 @@ fn creates_mask_params_bind_group() {
 fn mask_params_update_skips_unchanged_layout() {
     let (device, queue) = wgpu::Device::noop(&wgpu::DeviceDescriptor::default());
     let renderer = WgpuLive2dRenderer::new(&device, wgpu::TextureFormat::Rgba8UnormSrgb);
-    let layout = mocari::render::wgpu::WgpuClippingLayout::new(
+    let layout = neocari::render::wgpu::WgpuClippingLayout::new(
         WgpuMaskChannel::Red,
         WgpuClippingRect::new(0.0, 0.0, 1.0, 1.0),
     );
-    let changed = mocari::render::wgpu::WgpuClippingLayout::new(
+    let changed = neocari::render::wgpu::WgpuClippingLayout::new(
         WgpuMaskChannel::Red,
         WgpuClippingRect::new(0.25, 0.25, 0.5, 0.5),
     );
@@ -353,7 +353,7 @@ fn creates_mask_pipeline_and_encodes_mask_draw_call() {
     let transform = renderer.create_transform(&device, &Matrix44::identity());
     let params = renderer.create_mask_params(
         &device,
-        mocari::render::wgpu::WgpuClippingLayout::new(
+        neocari::render::wgpu::WgpuClippingLayout::new(
             WgpuMaskChannel::Red,
             WgpuClippingRect::new(0.0, 0.0, 1.0, 1.0),
         ),
@@ -825,7 +825,7 @@ fn mesh_buffers_update_drawables_rejects_topology_changes() {
 
     assert_eq!(
         error,
-        mocari::render::wgpu::WgpuMeshUpdateError::Indices { drawable_index: 0 }
+        neocari::render::wgpu::WgpuMeshUpdateError::Indices { drawable_index: 0 }
     );
 }
 

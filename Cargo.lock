@@ -816,21 +816,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "mocari"
-version = "0.4.0"
-dependencies = [
- "ab_glyph",
- "image",
- "png",
- "pollster",
- "serde",
- "serde_json",
- "thiserror 2.0.18",
- "wgpu",
- "winit",
-]
-
-[[package]]
 name = "moxcms"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -906,6 +891,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ee6cda3051665f1fb8d9e08fc35c96d5a244fb1be711a03b71118828afc9a873"
 dependencies = [
  "jni-sys 0.3.1",
+]
+
+[[package]]
+name = "neocari"
+version = "0.4.0"
+dependencies = [
+ "ab_glyph",
+ "image",
+ "png",
+ "pollster",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "wgpu",
+ "winit",
 ]
 
 [[package]]

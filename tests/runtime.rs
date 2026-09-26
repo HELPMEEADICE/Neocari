@@ -1,4 +1,4 @@
-use mocari::{
+use neocari::{
     assets::{load_model, load_model_runtime},
     expression::{ExpressionManager, ExpressionPlayer, load_expression},
     json::{Expression3, Motion3},
@@ -118,7 +118,7 @@ fn updating_parameters_reuses_runtime_mesh_storage() {
     );
 }
 
-fn drawable_center(mesh: &mocari::moc3::Moc3DrawableMesh) -> (f32, f32) {
+fn drawable_center(mesh: &neocari::moc3::Moc3DrawableMesh) -> (f32, f32) {
     let first = mesh.vertices().first().expect("hit drawable has vertices");
     let [mut min_x, mut min_y] = first.position();
     let mut max_x = min_x;
@@ -253,7 +253,7 @@ fn parameter_overrides_can_be_applied_after_parameter_reset() {
 fn motion_player_drives_a_parameter_over_time() {
     let mut model = load_model_runtime("assets/models/Haru/Haru.model3.json").unwrap();
     let motion =
-        mocari::motion::load_motion("assets/models/Haru/motions/haru_g_idle.motion3.json").unwrap();
+        neocari::motion::load_motion("assets/models/Haru/motions/haru_g_idle.motion3.json").unwrap();
 
     let target = motion
         .curves()
@@ -340,7 +340,7 @@ fn one_shot_player_finishes_looping_motion() {
     assert_eq!(player.time(), 1.0);
 }
 
-fn hiyori_mesh_snapshot(model: &mocari::assets::RuntimeModel) -> Vec<Vec<[f32; 2]>> {
+fn hiyori_mesh_snapshot(model: &neocari::assets::RuntimeModel) -> Vec<Vec<[f32; 2]>> {
     model
         .runtime()
         .meshes()

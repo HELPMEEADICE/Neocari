@@ -1,11 +1,12 @@
 #![forbid(unsafe_code)]
 //! A pure Rust runtime for reading and driving Live2D/Cubism-compatible model data.
 //!
-//! Mocari is split into a small set of layers so applications can choose how much
+//! Neocari is split into a small set of layers so applications can choose how much
 //! control they need:
 //!
 //! - [`assets`] loads a `.model3.json` file, its referenced `.moc3` data, pose
 //!   file, and PNG textures from disk.
+//! - `assets::load_moc2_model` loads Cubism 2 settings and .moc data into default-pose drawables.
 //! - [`ModelRuntime`] owns the mutable model state used by motions, expressions,
 //!   pose fading, and drawable mesh generation.
 //! - [`motion`] and [`expression`] provide lightweight players for Cubism motion
@@ -20,7 +21,7 @@
 //! renderer.
 //!
 //! ```no_run
-//! use mocari::{assets::load_model_runtime, MotionPlayer};
+//! use neocari::{assets::load_model_runtime, MotionPlayer};
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut model = load_model_runtime("assets/models/Hiyori/Hiyori.model3.json")?;
@@ -46,7 +47,9 @@ pub mod error;
 pub mod expression;
 /// Parsers and data models for Cubism JSON sidecar files.
 pub mod json;
-/// Parsers and mesh builders for `.moc3` model data.
+/// Cubism 2 model parser and default-pose drawable builder.
+pub mod moc2;
+/// Parses and builds Cubism 3 .moc3 model data.
 pub mod moc3;
 /// Motion playback against a [`ModelRuntime`].
 pub mod motion;

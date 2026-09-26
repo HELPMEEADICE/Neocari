@@ -1,10 +1,10 @@
 [package]
-name = "mocari"
+name = "neocari"
 version = "0.4.0"
 edition = "2024"
-description = "A pure Rust Live2D/Cubism-compatible runtime"
-license = "MIT"
-repository = "https://github.com/Eatgrapes/Mocari"
+description = "A pure Rust Live2D/Cubism runtime with native Cubism V2 model support"
+license = "GPL-3.0-only"
+repository = "https://github.com/HELPMEEADICE/Neocari"
 readme = "README.md"
 keywords = ["live2d", "cubism", "runtime", "renderer", "wgpu"]
 categories = ["rendering", "game-development", "graphics"]
@@ -29,6 +29,10 @@ winit = "0.30.13"
 
 [[example]]
 name = "show_model"
+required-features = ["wgpu"]
+
+[[example]]
+name = "render_moc2"
 required-features = ["wgpu"]
 
 [[test]]

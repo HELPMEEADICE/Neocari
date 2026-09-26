@@ -1,4 +1,4 @@
-use mocari::{
+use neocari::{
     Error,
     moc3::{Moc3ArtMeshInfo, Moc3ArtMeshes},
 };
@@ -118,7 +118,7 @@ fn write_f32_array(bytes: &mut [u8], offset: usize, values: &[f32]) {
 }
 
 mod moc3_art_mesh_keyforms {
-    use mocari::{
+    use neocari::{
         Error,
         moc3::{Moc3ArtMeshKeyformInfo, Moc3ArtMeshKeyforms},
     };
@@ -231,7 +231,7 @@ mod moc3_art_mesh_keyforms {
 mod moc3_drawable_mesh {
     use std::fs;
 
-    use mocari::moc3::{
+    use neocari::moc3::{
         Moc3ArtMeshInfo, Moc3ArtMeshKeyformInfo, Moc3ArtMeshKeyforms, Moc3ArtMeshes, Moc3Deformers,
         Moc3DrawableBlendMode, Moc3Ids, Moc3KeyformBindings, Moc3OffscreenInfo,
         build_moc3_drawable_mesh, build_moc3_drawable_meshes,

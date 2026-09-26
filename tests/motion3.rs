@@ -1,4 +1,4 @@
-use mocari::{
+use neocari::{
     Error,
     json::{Motion3, MotionPoint, MotionSegment},
     json::{

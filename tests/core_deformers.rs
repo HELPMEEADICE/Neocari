@@ -1,4 +1,4 @@
-use mocari::core::{
+use neocari::core::{
     DeformerTransform, Vector2, WarpInterpolation, rotation_deformer_transform_point,
     transform_art_mesh_vertices_by_deformers, warp_deformer_transform_inside,
     warp_deformer_transform_target,

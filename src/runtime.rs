@@ -898,7 +898,8 @@ mod tests {
         runtime.pose_opacities = vec![1.0];
 
         runtime.update_part_opacities();
+        runtime.update_drawable_part_opacities();
 
-        assert_eq!(runtime.drawable_part_opacities(), vec![1.0]);
+        assert_eq!(runtime.drawable_part_opacities, vec![1.0]);
     }
 }

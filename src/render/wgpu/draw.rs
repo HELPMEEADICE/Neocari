@@ -152,6 +152,11 @@ impl WgpuLive2dRenderer {
         mut bind_group_for_texture: impl FnMut(i32) -> Result<&'a wgpu::BindGroup, WgpuRenderError>,
     ) -> Result<u32, WgpuRenderError> {
         let mut drawn = 0;
+        let packed_buffers = mesh_buffers.packed_buffers();
+        if let Some((vertex_buffer, index_buffer)) = packed_buffers {
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+        }
         for &drawable_index in mesh_buffers.draw_order_indices() {
             let drawable = mesh_buffers
                 .drawables()
@@ -171,10 +176,12 @@ impl WgpuLive2dRenderer {
             render_pass.set_pipeline(self.pipeline_for_blend_mode(drawable.blend_mode()));
             render_pass.set_bind_group(0, texture_bind_group, &[]);
             render_pass.set_bind_group(1, transform.bind_group(), &[]);
-            render_pass.set_vertex_buffer(0, drawable.vertex_buffer().slice(..));
-            render_pass
-                .set_index_buffer(drawable.index_buffer().slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..drawable.index_count(), 0, 0..1);
+            if packed_buffers.is_none() {
+                render_pass.set_vertex_buffer(0, drawable.vertex_buffer_slice());
+                render_pass
+                    .set_index_buffer(drawable.index_buffer_slice(), wgpu::IndexFormat::Uint16);
+            }
+            render_pass.draw_indexed(drawable.draw_index_range(), drawable.base_vertex(), 0..1);
             drawn += 1;
         }
 
@@ -189,6 +196,11 @@ impl WgpuLive2dRenderer {
         mut bind_group_for_texture: impl FnMut(i32) -> Result<&'a wgpu::BindGroup, WgpuRenderError>,
     ) -> Result<u32, WgpuRenderError> {
         let mut drawn = 0;
+        let packed_buffers = mesh_buffers.packed_buffers();
+        if let Some((vertex_buffer, index_buffer)) = packed_buffers {
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+        }
         for context in clipping_resources.contexts() {
             for &drawable_index in context.mask_drawable_indices() {
                 let drawable = mesh_buffers
@@ -204,10 +216,12 @@ impl WgpuLive2dRenderer {
                 render_pass.set_bind_group(0, texture_bind_group, &[]);
                 render_pass.set_bind_group(1, context.mask_transform().bind_group(), &[]);
                 render_pass.set_bind_group(2, context.mask_params().bind_group(), &[]);
-                render_pass.set_vertex_buffer(0, drawable.vertex_buffer().slice(..));
-                render_pass
-                    .set_index_buffer(drawable.index_buffer().slice(..), wgpu::IndexFormat::Uint16);
-                render_pass.draw_indexed(0..drawable.index_count(), 0, 0..1);
+                if packed_buffers.is_none() {
+                    render_pass.set_vertex_buffer(0, drawable.vertex_buffer_slice());
+                    render_pass
+                        .set_index_buffer(drawable.index_buffer_slice(), wgpu::IndexFormat::Uint16);
+                }
+                render_pass.draw_indexed(drawable.draw_index_range(), drawable.base_vertex(), 0..1);
                 drawn += 1;
             }
         }
@@ -225,6 +239,11 @@ impl WgpuLive2dRenderer {
         mut bind_group_for_texture: impl FnMut(i32) -> Result<&'a wgpu::BindGroup, WgpuRenderError>,
     ) -> Result<u32, WgpuRenderError> {
         let mut drawn = 0;
+        let packed_buffers = mesh_buffers.packed_buffers();
+        if let Some((vertex_buffer, index_buffer)) = packed_buffers {
+            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
+        }
         for &drawable_index in mesh_buffers.draw_order_indices() {
             let drawable = mesh_buffers
                 .drawables()
@@ -251,10 +270,12 @@ impl WgpuLive2dRenderer {
                 render_pass.set_bind_group(3, context.clip_params().bind_group(), &[]);
             }
 
-            render_pass.set_vertex_buffer(0, drawable.vertex_buffer().slice(..));
-            render_pass
-                .set_index_buffer(drawable.index_buffer().slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.draw_indexed(0..drawable.index_count(), 0, 0..1);
+            if packed_buffers.is_none() {
+                render_pass.set_vertex_buffer(0, drawable.vertex_buffer_slice());
+                render_pass
+                    .set_index_buffer(drawable.index_buffer_slice(), wgpu::IndexFormat::Uint16);
+            }
+            render_pass.draw_indexed(drawable.draw_index_range(), drawable.base_vertex(), 0..1);
             drawn += 1;
         }
 

@@ -135,6 +135,9 @@ impl Moc2Model {
         if version >= 8 && (reader.read_u16()? != 0x8888 || reader.read_u16()? != 0x8888) {
             return Err(Moc2Error::InvalidData("invalid end marker"));
         }
+        // Object references are resolved once the root is parsed. Keep the reachable
+        // model graph through root, but release the parser index before mesh building.
+        reader.objects.clear();
         let Object::Model {
             parameters,
             parts,
@@ -201,9 +204,10 @@ impl Moc2Model {
             if flags & 1 != 0 {
                 return Err(Moc2Error::UnsupportedTextureOption(*flags));
             }
-            let positions = interpolate_vector(positions, pivots, &defaults)?;
-            let draw_order = interpolate_scalar_int(draw_orders, pivots, &defaults)?;
-            let opacity = interpolate_scalar_float(opacities, pivots, &defaults)?;
+            let pivot_weights = PivotWeights::new(pivots, &defaults)?;
+            let positions = interpolate_vector(positions, &pivot_weights)?;
+            let draw_order = interpolate_scalar_int(draw_orders, &pivot_weights)?;
+            let opacity = interpolate_scalar_float(opacities, &pivot_weights)?;
             let uv_values = float_array(uvs)?;
             let raw_indices = integer_array(indices)?;
             if *point_count == 0
@@ -361,11 +365,12 @@ fn read_parameter_defaults(parameters: Option<&Ref>) -> Result<Vec<(String, f32)
 }
 
 #[derive(Debug)]
-struct Dimension {
-    id: Option<String>,
-    values: Vec<f32>,
+struct Dimension<'a> {
+    id: Option<&'a str>,
+    values: &'a [f32],
 }
-fn dimensions(pivots: &Ref) -> Result<Vec<Dimension>, Moc2Error> {
+
+fn dimensions(pivots: &Ref) -> Result<Vec<Dimension<'_>>, Moc2Error> {
     let Object::PivotManager(list) = pivots.as_ref() else {
         return Err(Moc2Error::InvalidData("expected a pivot manager"));
     };
@@ -373,99 +378,107 @@ fn dimensions(pivots: &Ref) -> Result<Vec<Dimension>, Moc2Error> {
         .iter()
         .map(|item| match item.as_ref() {
             Object::ParameterPivots { id, values } => Ok(Dimension {
-                id: id.clone(),
-                values: float_array(values)?.to_vec(),
+                id: id.as_deref(),
+                values: float_array(values)?,
             }),
             _ => Err(Moc2Error::InvalidData("invalid pivot table entry")),
         })
         .collect()
 }
-fn corner_weights(
-    pivots: &Ref,
-    defaults: &[(String, f32)],
-) -> Result<Vec<(usize, f32)>, Moc2Error> {
-    let dims = dimensions(pivots)?
-        .into_iter()
-        .filter(|d| d.values.len() > 1)
-        .collect::<Vec<_>>();
-    if dims.len() > 8 {
-        return Err(Moc2Error::InvalidData(
-            "pivot manager has too many dimensions",
-        ));
-    }
-    let mut lower = Vec::with_capacity(dims.len());
-    let mut fraction = Vec::with_capacity(dims.len());
-    let mut stride = 1usize;
-    let mut strides = Vec::with_capacity(dims.len());
-    for dim in &dims {
-        if dim.values.is_empty() {
-            return Err(Moc2Error::InvalidData("empty parameter pivot list"));
+
+struct PivotWeights {
+    pivot_count: usize,
+    corners: Vec<(usize, f32)>,
+}
+
+impl PivotWeights {
+    fn new(pivots: &Ref, defaults: &[(String, f32)]) -> Result<Self, Moc2Error> {
+        let dimensions = dimensions(pivots)?;
+        let pivot_count = dimensions.iter().try_fold(1usize, |count, dimension| {
+            count
+                .checked_mul(dimension.values.len())
+                .ok_or(Moc2Error::InvalidData("pivot table too large"))
+        })?;
+        let dimensions = dimensions
+            .into_iter()
+            .filter(|dimension| dimension.values.len() > 1)
+            .collect::<Vec<_>>();
+        if dimensions.len() > 8 {
+            return Err(Moc2Error::InvalidData(
+                "pivot manager has too many dimensions",
+            ));
         }
-        let value = dim
-            .id
-            .as_deref()
-            .and_then(|id| defaults.iter().find(|(key, _)| key == id))
-            .map(|(_, value)| *value)
-            .unwrap_or(dim.values[0]);
-        let mut lo = 0usize;
-        let mut t = 0.0f32;
-        if value >= dim.values[dim.values.len() - 1] {
-            lo = dim.values.len() - 2;
-            t = 1.0;
-        } else if value > dim.values[0] {
-            for i in 0..dim.values.len() - 1 {
-                if value <= dim.values[i + 1] {
-                    lo = i;
-                    let span = dim.values[i + 1] - dim.values[i];
-                    t = if span > 0.0 {
-                        (value - dim.values[i]) / span
-                    } else {
-                        0.0
-                    };
-                    break;
+
+        let mut lower = Vec::with_capacity(dimensions.len());
+        let mut fraction = Vec::with_capacity(dimensions.len());
+        let mut stride = 1usize;
+        let mut strides = Vec::with_capacity(dimensions.len());
+        for dimension in &dimensions {
+            if dimension.values.is_empty() {
+                return Err(Moc2Error::InvalidData("empty parameter pivot list"));
+            }
+            let value = dimension
+                .id
+                .and_then(|id| defaults.iter().find(|(key, _)| key == id))
+                .map(|(_, value)| *value)
+                .unwrap_or(dimension.values[0]);
+            let mut lo = 0usize;
+            let mut t = 0.0f32;
+            if value >= dimension.values[dimension.values.len() - 1] {
+                lo = dimension.values.len() - 2;
+                t = 1.0;
+            } else if value > dimension.values[0] {
+                for i in 0..dimension.values.len() - 1 {
+                    if value <= dimension.values[i + 1] {
+                        lo = i;
+                        let span = dimension.values[i + 1] - dimension.values[i];
+                        t = if span > 0.0 {
+                            (value - dimension.values[i]) / span
+                        } else {
+                            0.0
+                        };
+                        break;
+                    }
                 }
             }
+            lower.push(lo);
+            fraction.push(t.clamp(0.0, 1.0));
+            strides.push(stride);
+            stride = stride
+                .checked_mul(dimension.values.len())
+                .ok_or(Moc2Error::InvalidData("pivot table too large"))?;
         }
-        lower.push(lo);
-        fraction.push(t.clamp(0.0, 1.0));
-        strides.push(stride);
-        stride = stride
-            .checked_mul(dim.values.len())
-            .ok_or(Moc2Error::InvalidData("pivot table too large"))?;
-    }
-    let mut corners = Vec::with_capacity(1usize << dims.len());
-    for bits in 0..(1usize << dims.len()) {
-        let mut index = 0usize;
-        let mut weight = 1.0;
-        for d in 0..dims.len() {
-            let high = bits & (1 << d) != 0;
-            index += (lower[d] + usize::from(high)) * strides[d];
-            weight *= if high { fraction[d] } else { 1.0 - fraction[d] };
+
+        let mut corners = Vec::with_capacity(1usize << dimensions.len());
+        for bits in 0..(1usize << dimensions.len()) {
+            let mut index = 0usize;
+            let mut weight = 1.0;
+            for dimension in 0..dimensions.len() {
+                let high = bits & (1 << dimension) != 0;
+                index += (lower[dimension] + usize::from(high)) * strides[dimension];
+                weight *= if high {
+                    fraction[dimension]
+                } else {
+                    1.0 - fraction[dimension]
+                };
+            }
+            corners.push((index, weight));
         }
-        corners.push((index, weight));
+        if corners.is_empty() {
+            corners.push((0, 1.0));
+        }
+        Ok(Self {
+            pivot_count,
+            corners,
+        })
     }
-    if corners.is_empty() {
-        corners.push((0, 1.0));
-    }
-    Ok(corners)
 }
-fn pivot_count(pivots: &Ref) -> Result<usize, Moc2Error> {
-    dimensions(pivots)?.iter().try_fold(1usize, |count, dim| {
-        count
-            .checked_mul(dim.values.len())
-            .ok_or(Moc2Error::InvalidData("pivot table too large"))
-    })
-}
-fn interpolate_vector(
-    values: &Ref,
-    pivots: &Ref,
-    defaults: &[(String, f32)],
-) -> Result<Vec<f32>, Moc2Error> {
-    let count = pivot_count(pivots)?;
+
+fn interpolate_vector(values: &Ref, weights: &PivotWeights) -> Result<Vec<f32>, Moc2Error> {
+    let count = weights.pivot_count;
     if count == 0 {
         return Err(Moc2Error::InvalidData("pivot vector length is invalid"));
     }
-    let corners = corner_weights(pivots, defaults)?;
     match values.as_ref() {
         Object::Floats(values) => {
             if values.len() % count != 0 {
@@ -473,7 +486,7 @@ fn interpolate_vector(
             }
             let stride = values.len() / count;
             let mut output = vec![0.0; stride];
-            for (pivot, weight) in corners {
+            for (pivot, weight) in &weights.corners {
                 let start = pivot
                     .checked_mul(stride)
                     .ok_or(Moc2Error::InvalidData("pivot vector too large"))?;
@@ -495,9 +508,9 @@ fn interpolate_vector(
                 .ok_or(Moc2Error::InvalidData("missing pivot keyforms"))?;
             let stride = float_array(first)?.len();
             let mut output = vec![0.0; stride];
-            for (pivot, weight) in corners {
+            for (pivot, weight) in &weights.corners {
                 let values = keyforms
-                    .get(pivot)
+                    .get(*pivot)
                     .ok_or(Moc2Error::InvalidData("pivot index out of bounds"))?;
                 let values = float_array(values)?;
                 if values.len() != stride {
@@ -512,13 +525,11 @@ fn interpolate_vector(
         _ => Err(Moc2Error::InvalidData("expected pivot vector data")),
     }
 }
-fn interpolate_scalar_float(
-    values: &Ref,
-    pivots: &Ref,
-    defaults: &[(String, f32)],
-) -> Result<f32, Moc2Error> {
+
+fn interpolate_scalar_float(values: &Ref, weights: &PivotWeights) -> Result<f32, Moc2Error> {
     let values = float_array(values)?;
-    corner_weights(pivots, defaults)?
+    weights
+        .corners
         .iter()
         .try_fold(0.0, |sum, (index, weight)| {
             values
@@ -527,16 +538,13 @@ fn interpolate_scalar_float(
                 .ok_or(Moc2Error::InvalidData("pivot index exceeds float array"))
         })
 }
-fn interpolate_scalar_int(
-    values: &Ref,
-    pivots: &Ref,
-    defaults: &[(String, f32)],
-) -> Result<i32, Moc2Error> {
+
+fn interpolate_scalar_int(values: &Ref, weights: &PivotWeights) -> Result<i32, Moc2Error> {
     let values = integer_array(values)?;
     let mut result = 0.0f32;
-    for (index, weight) in corner_weights(pivots, defaults)? {
+    for (index, weight) in &weights.corners {
         let value = values
-            .get(index)
+            .get(*index)
             .ok_or(Moc2Error::InvalidData("pivot index exceeds integer array"))?;
         result += *value as f32 * weight;
     }
@@ -567,14 +575,13 @@ fn index_deformers(deformers: &[Ref]) -> Result<HashMap<String, Ref>, Moc2Error>
 }
 fn affine_values(
     affines: &Ref,
-    pivots: &Ref,
-    defaults: &[(String, f32)],
+    weights: &PivotWeights,
 ) -> Result<([f32; 5], [bool; 2]), Moc2Error> {
     let entries = object_array(affines)?;
     let mut values = [0.0f32; 5];
     let mut reflect = [false; 2];
     let mut strongest = -1.0f32;
-    for (index, weight) in corner_weights(pivots, defaults)? {
+    for (index, weight) in &weights.corners {
         let Object::Affine {
             x,
             y,
@@ -584,19 +591,19 @@ fn affine_values(
             rx,
             ry,
         } = entries
-            .get(index)
+            .get(*index)
             .ok_or(Moc2Error::InvalidData("pivot index exceeds affine list"))?
             .as_ref()
         else {
             return Err(Moc2Error::InvalidData("invalid affine entry"));
         };
-        values[0] += x * weight;
-        values[1] += y * weight;
-        values[2] += sx * weight;
-        values[3] += sy * weight;
-        values[4] += angle * weight;
-        if weight > strongest {
-            strongest = weight;
+        values[0] += *x * *weight;
+        values[1] += *y * *weight;
+        values[2] += *sx * *weight;
+        values[3] += *sy * *weight;
+        values[4] += *angle * *weight;
+        if *weight > strongest {
+            strongest = *weight;
             reflect = [*rx, *ry];
         }
     }
@@ -689,53 +696,46 @@ fn evaluate_deformer_transform(
         "drawable references a missing deformer",
     ))?;
     let parent_id = match object.as_ref() {
-        Object::Warp { target, .. } | Object::Rotation { target, .. } => target
-            .as_deref()
-            .filter(|target| *target != "DST_BASE")
-            .map(str::to_owned),
+        Object::Warp { target, .. } | Object::Rotation { target, .. } => {
+            target.as_deref().filter(|target| *target != "DST_BASE")
+        }
         _ => return Err(Moc2Error::InvalidData("unknown deformer type")),
     };
-    if let Some(parent_id) = parent_id.as_deref() {
+    if let Some(parent_id) = parent_id {
         evaluate_deformer_transform(parent_id, deformers, defaults, transforms, depth + 1)?;
     }
     let parent = parent_id
-        .as_deref()
         .map(|parent_id| {
             transforms
                 .get(parent_id)
-                .cloned()
                 .ok_or(Moc2Error::InvalidData("missing parent deformer transform"))
         })
         .transpose()?;
+    let pivots = match object.as_ref() {
+        Object::Warp { pivots, .. } | Object::Rotation { pivots, .. } => pivots,
+        _ => return Err(Moc2Error::InvalidData("unknown deformer type")),
+    };
+    let pivot_weights = PivotWeights::new(pivots, defaults)?;
     let opacity = match object.as_ref() {
-        Object::Warp {
-            pivots, opacities, ..
-        }
-        | Object::Rotation {
-            pivots, opacities, ..
-        } => opacities
+        Object::Warp { opacities, .. } | Object::Rotation { opacities, .. } => opacities
             .as_ref()
-            .map(|values| interpolate_scalar_float(values, pivots, defaults))
+            .map(|values| interpolate_scalar_float(values, &pivot_weights))
             .transpose()?
             .unwrap_or(1.0),
         _ => unreachable!(),
     };
-    let total_opacity = parent
-        .as_ref()
-        .map_or(1.0, DeformerTransform::total_opacity)
-        * opacity;
+    let total_opacity = parent.as_ref().map_or(1.0, |parent| parent.total_opacity()) * opacity;
     let transform = match object.as_ref() {
         Object::Warp {
             columns,
             rows,
-            pivots,
             positions,
             ..
         } => {
             if *rows == 0 || *columns == 0 {
                 return Err(Moc2Error::InvalidData("empty warp grid"));
             }
-            let mut grid = interpolate_vector(positions, pivots, defaults)?;
+            let mut grid = interpolate_vector(positions, &pivot_weights)?;
             if grid.len() != (rows + 1) * (columns + 1) * 2 {
                 return Err(Moc2Error::InvalidData("invalid warp grid length"));
             }
@@ -749,14 +749,12 @@ fn evaluate_deformer_transform(
                 rows: *rows,
                 columns: *columns,
                 grid,
-                total_scale: parent.as_ref().map_or(1.0, DeformerTransform::total_scale),
+                total_scale: parent.map_or(1.0, |parent| parent.total_scale()),
                 total_opacity,
             }
         }
-        Object::Rotation {
-            pivots, affines, ..
-        } => {
-            let (a, reflect) = affine_values(affines, pivots, defaults)?;
+        Object::Rotation { affines, .. } => {
+            let (a, reflect) = affine_values(affines, &pivot_weights)?;
             let (origin, angle_degrees, total_scale) = if let Some(parent) = parent.as_ref() {
                 let origin = parent.transform_point([a[0], a[1]])?;
                 let direction = [0.0, if parent.is_rotation() { -10.0 } else { -0.1 }];

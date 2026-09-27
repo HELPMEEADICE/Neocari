@@ -85,9 +85,14 @@ pub fn vertices_from_drawable(mesh: &Moc3DrawableMesh) -> Vec<DrawableVertex> {
 ///
 /// The output buffer is cleared before new bytes are appended.
 pub fn encode_vertices_from_drawable(mesh: &Moc3DrawableMesh, bytes: &mut Vec<u8>) {
-    let byte_len = mesh.vertices().len() * DrawableVertex::STRIDE;
     bytes.clear();
-    bytes.resize(byte_len, 0);
+    append_vertices_from_drawable(mesh, bytes);
+}
+
+pub(crate) fn append_vertices_from_drawable(mesh: &Moc3DrawableMesh, bytes: &mut Vec<u8>) {
+    let start = bytes.len();
+    let byte_len = mesh.vertices().len() * DrawableVertex::STRIDE;
+    bytes.resize(start + byte_len, 0);
 
     let opacity = mesh.opacity();
     let multiply = mesh.multiply_color();
@@ -99,7 +104,7 @@ pub fn encode_vertices_from_drawable(mesh: &Moc3DrawableMesh, bytes: &mut Vec<u8
             opacity,
             multiply,
             screen,
-            &mut bytes[index * DrawableVertex::STRIDE..][..DrawableVertex::STRIDE],
+            &mut bytes[start + index * DrawableVertex::STRIDE..][..DrawableVertex::STRIDE],
         );
     }
 }

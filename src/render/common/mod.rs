@@ -13,6 +13,8 @@ pub use clipping::{
 };
 #[cfg(feature = "wgpu")]
 pub(crate) use clipping::{draw_order_indices_from, draw_order_indices_from_into};
+#[cfg(feature = "wgpu")]
+pub(crate) use vertex::append_vertices_from_drawable;
 pub use vertex::{
     DrawableVertex, encode_indices, encode_vertices, encode_vertices_from_drawable,
     vertex_from_drawable_vertex, vertices_from_drawable,

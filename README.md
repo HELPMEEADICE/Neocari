@@ -42,7 +42,8 @@ neocari = { git = "https://github.com/HELPMEEADICE/Neocari", features = ["wgpu"]
 
 ## Render a Cubism V2 model
 
-The `assets::load_moc2_model` loader accepts a Cubism V2 model settings JSON and loads its `.moc` file and PNG textures. The generated meshes can be passed to the same WGPU renderer used for Cubism V3.
+The `assets::load_moc2_model` loader accepts a Cubism V2 model settings JSON and loads its `.moc` file and PNG textures. The generated meshes can be passed to the same WGPU renderer used for Cubism V3. For V2's fixed default-pose meshes, use
+`WgpuMeshBuffers::from_static_drawables` to pack geometry into shared GPU buffers and avoid update snapshots.
 
 ```bash
 cargo run --features wgpu --example render_moc2 -- path/to/model.model.json output.png

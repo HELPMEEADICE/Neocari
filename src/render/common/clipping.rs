@@ -40,7 +40,7 @@ impl DrawableInfo {
     }
 
     #[cfg(feature = "wgpu")]
-    pub(crate) fn update_from_mesh(&mut self, mesh: &Moc3DrawableMesh) {
+    pub(crate) fn update_from_mesh(&mut self, mesh: &Moc3DrawableMesh, update_bounds: bool) {
         self.texture_index = mesh.texture_index();
         self.blend_mode = mesh.blend_mode();
         self.opacity = mesh.opacity();
@@ -51,7 +51,9 @@ impl DrawableInfo {
             self.mask_key = sorted_mask_key(&self.masks);
         }
         self.inverted_mask = mesh.is_inverted_mask();
-        self.bounds = drawable_vertex_bounds(mesh.vertices());
+        if update_bounds {
+            self.bounds = drawable_vertex_bounds(mesh.vertices());
+        }
     }
 
     /// Returns the texture index referenced by this drawable.

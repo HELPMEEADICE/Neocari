@@ -92,7 +92,7 @@ async fn render() -> Result<(), Box<dyn Error>> {
         })
         .collect::<Result<Vec<_>, _>>()?;
     eprintln!("textures uploaded");
-    let mesh_buffers = WgpuMeshBuffers::from_drawables(&device, drawables)
+    let mesh_buffers = WgpuMeshBuffers::from_static_drawables(&device, drawables)
         .ok_or("failed to create GPU mesh buffers")?;
     eprintln!("mesh buffers ready");
     let mut clipping_plan = WgpuClippingPlan::from_mesh_buffers(&mesh_buffers);

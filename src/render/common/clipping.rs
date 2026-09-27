@@ -39,6 +39,21 @@ impl DrawableInfo {
         }
     }
 
+    #[cfg(feature = "wgpu")]
+    pub(crate) fn update_from_mesh(&mut self, mesh: &Moc3DrawableMesh) {
+        self.texture_index = mesh.texture_index();
+        self.blend_mode = mesh.blend_mode();
+        self.opacity = mesh.opacity();
+        self.draw_order = mesh.draw_order();
+        self.render_order = mesh.render_order();
+        if self.masks.as_ref() != mesh.masks() {
+            self.masks = Arc::<[i32]>::from(mesh.masks());
+            self.mask_key = sorted_mask_key(&self.masks);
+        }
+        self.inverted_mask = mesh.is_inverted_mask();
+        self.bounds = drawable_vertex_bounds(mesh.vertices());
+    }
+
     /// Returns the texture index referenced by this drawable.
     pub fn texture_index(&self) -> i32 {
         self.texture_index
@@ -106,13 +121,29 @@ pub fn draw_order_indices(drawables: &[DrawableInfo]) -> Vec<usize> {
 
 pub(crate) fn draw_order_indices_from(
     count: usize,
+    draw_order: impl FnMut(usize) -> f32,
+    render_order: impl FnMut(usize) -> i32,
+) -> Vec<usize> {
+    let mut indices = Vec::with_capacity(count);
+    let mut seen = Vec::with_capacity(count);
+    draw_order_indices_from_into(count, draw_order, render_order, &mut indices, &mut seen);
+    indices
+}
+
+pub(crate) fn draw_order_indices_from_into(
+    count: usize,
     mut draw_order: impl FnMut(usize) -> f32,
     mut render_order: impl FnMut(usize) -> i32,
-) -> Vec<usize> {
-    let mut indices = (0..count).collect::<Vec<_>>();
-    if render_orders_are_total_rank_from(count, &mut render_order) {
+    indices: &mut Vec<usize>,
+    seen: &mut Vec<bool>,
+) {
+    indices.clear();
+    indices.extend(0..count);
+    seen.clear();
+    seen.resize(count, false);
+    if render_orders_are_total_rank_from(count, &mut render_order, seen) {
         indices.sort_by_key(|&index| render_order(index));
-        return indices;
+        return;
     }
     indices.sort_by(|left, right| {
         draw_order_from_raw(draw_order(*left))
@@ -120,17 +151,16 @@ pub(crate) fn draw_order_indices_from(
             .then_with(|| render_order(*left).cmp(&render_order(*right)))
             .then_with(|| left.cmp(right))
     });
-    indices
 }
 
 fn render_orders_are_total_rank_from(
     count: usize,
     render_order: &mut impl FnMut(usize) -> i32,
+    seen: &mut [bool],
 ) -> bool {
     if count == 0 {
         return false;
     }
-    let mut seen = vec![false; count];
     let mut identity = true;
     for index in 0..count {
         let Ok(rank) = usize::try_from(render_order(index)) else {

@@ -12,7 +12,7 @@ Neocari is an unofficial and independent community project. It is not affiliated
 
 - Parse and render Cubism V2 `.moc` models at their declared default parameter values.
 - Load Cubism V2 model settings JSON and referenced PNG textures.
-- Render Cubism V3 `.moc3` models and use the parameter, motion, expression, and physics runtime.
+- Render Cubism V3/V4/V5 `.moc3` models and use the parameter, motion, expression, and physics runtime.
 - Use the built-in `wgpu` renderer or provide a custom backend through `render::common`.
 
 Cubism V2 motion playback and interactive V2 parameter updates are not implemented yet.

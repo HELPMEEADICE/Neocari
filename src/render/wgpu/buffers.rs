@@ -2,8 +2,8 @@ use wgpu::util::DeviceExt;
 
 use crate::moc3::{Moc3DrawableBlendMode, Moc3DrawableMesh};
 use crate::render::common::{
-    ClippingRect, DrawableInfo, DrawableVertex, draw_order_indices_from, encode_indices,
-    encode_vertices_from_drawable,
+    ClippingRect, DrawableInfo, DrawableVertex, draw_order_indices_from,
+    draw_order_indices_from_into, encode_indices, encode_vertices_from_drawable,
 };
 
 pub fn drawable_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
@@ -48,9 +48,70 @@ pub struct WgpuDrawableBuffers {
     index_buffer: wgpu::Buffer,
     vertex_count: u32,
     index_count: u32,
-    vertex_bytes: Vec<u8>,
+    vertex_snapshot: DrawableVertexSnapshot,
     indices: Vec<u16>,
     info: DrawableInfo,
+}
+
+#[derive(Debug)]
+struct DrawableVertexSnapshot {
+    position_uv_bits: Vec<[u32; 4]>,
+    opacity_bits: u32,
+    multiply_bits: [u32; 3],
+    screen_bits: [u32; 3],
+}
+
+impl DrawableVertexSnapshot {
+    fn from_mesh(mesh: &Moc3DrawableMesh) -> Self {
+        let mut snapshot = Self {
+            position_uv_bits: Vec::with_capacity(mesh.vertices().len()),
+            opacity_bits: 0,
+            multiply_bits: [0; 3],
+            screen_bits: [0; 3],
+        };
+        snapshot.update(mesh);
+        snapshot
+    }
+
+    fn matches(&self, mesh: &Moc3DrawableMesh) -> bool {
+        self.opacity_bits == mesh.opacity().to_bits()
+            && self.multiply_bits == color_bits(mesh.multiply_color())
+            && self.screen_bits == color_bits(mesh.screen_color())
+            && self.position_uv_bits.len() == mesh.vertices().len()
+            && self
+                .position_uv_bits
+                .iter()
+                .zip(mesh.vertices())
+                .all(|(cached, vertex)| {
+                    let position = vertex.position();
+                    let uv = vertex.uv();
+                    *cached
+                        == [
+                            position[0].to_bits(),
+                            position[1].to_bits(),
+                            uv[0].to_bits(),
+                            uv[1].to_bits(),
+                        ]
+                })
+    }
+
+    fn update(&mut self, mesh: &Moc3DrawableMesh) {
+        self.position_uv_bits.clear();
+        self.position_uv_bits
+            .extend(mesh.vertices().iter().map(|vertex| {
+                let position = vertex.position();
+                let uv = vertex.uv();
+                [
+                    position[0].to_bits(),
+                    position[1].to_bits(),
+                    uv[0].to_bits(),
+                    uv[1].to_bits(),
+                ]
+            }));
+        self.opacity_bits = mesh.opacity().to_bits();
+        self.multiply_bits = color_bits(mesh.multiply_color());
+        self.screen_bits = color_bits(mesh.screen_color());
+    }
 }
 
 impl WgpuDrawableBuffers {
@@ -115,6 +176,8 @@ impl WgpuDrawableBuffers {
 pub struct WgpuMeshBuffers {
     drawables: Vec<WgpuDrawableBuffers>,
     draw_order_indices: Vec<usize>,
+    render_order_seen: Vec<bool>,
+    vertex_upload_bytes: Vec<u8>,
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -191,6 +254,8 @@ impl WgpuMeshBuffers {
         );
 
         Some(Self {
+            render_order_seen: Vec::with_capacity(drawables.len()),
+            vertex_upload_bytes: Vec::new(),
             drawables,
             draw_order_indices,
         })
@@ -234,32 +299,44 @@ impl WgpuMeshBuffers {
             validate_drawable_update(drawable_index, drawable, mesh)?;
         }
 
-        let mut vertex_bytes = Vec::new();
         let mut uploads = 0;
         let mut bounds_changed = false;
         let mut visibility_changed = false;
-        for (drawable, mesh) in self.drawables.iter_mut().zip(meshes) {
-            if renderer_vertex_data_changed(drawable, mesh) {
-                encode_vertices_from_drawable(mesh, &mut vertex_bytes);
-                if !vertex_bytes.is_empty() {
-                    queue.write_buffer(&drawable.vertex_buffer, 0, &vertex_bytes);
-                    drawable.vertex_bytes.clear();
-                    drawable.vertex_bytes.extend_from_slice(&vertex_bytes);
-                    uploads += 1;
+        let mut order_changed = false;
+        {
+            let (drawables, vertex_upload_bytes) =
+                (&mut self.drawables, &mut self.vertex_upload_bytes);
+            for (drawable, mesh) in drawables.iter_mut().zip(meshes) {
+                if !drawable.vertex_snapshot.matches(mesh) {
+                    encode_vertices_from_drawable(mesh, vertex_upload_bytes);
+                    if !vertex_upload_bytes.is_empty() {
+                        queue.write_buffer(&drawable.vertex_buffer, 0, vertex_upload_bytes);
+                        uploads += 1;
+                    }
+                    drawable.vertex_snapshot.update(mesh);
                 }
+                let was_visible = drawable.is_visible();
+                let old_bounds = drawable.info.bounds();
+                let old_draw_order = drawable.draw_order().to_bits();
+                let old_render_order = drawable.render_order();
+                drawable.info.update_from_mesh(mesh);
+                let is_visible = drawable.is_visible();
+                bounds_changed |= old_bounds != drawable.info.bounds();
+                visibility_changed |= was_visible != is_visible;
+                order_changed |= old_draw_order != drawable.draw_order().to_bits()
+                    || old_render_order != drawable.render_order();
             }
-            let was_visible = drawable.is_visible();
-            let info = DrawableInfo::from_mesh(mesh);
-            let is_visible = !drawable.is_empty() && info.is_visible();
-            bounds_changed |= drawable.info.bounds() != info.bounds();
-            visibility_changed |= was_visible != is_visible;
-            drawable.info = info;
         }
-        self.draw_order_indices = draw_order_indices_from(
-            self.drawables.len(),
-            |index| self.drawables[index].draw_order(),
-            |index| self.drawables[index].render_order(),
-        );
+        if order_changed {
+            let drawables = &self.drawables;
+            draw_order_indices_from_into(
+                drawables.len(),
+                |index| drawables[index].draw_order(),
+                |index| drawables[index].render_order(),
+                &mut self.draw_order_indices,
+                &mut self.render_order_seen,
+            );
+        }
 
         Ok(WgpuMeshUpdate {
             uploaded_drawables: uploads,
@@ -383,49 +460,12 @@ pub fn create_wgpu_drawable_buffers(
         index_buffer,
         vertex_count,
         index_count,
-        vertex_bytes,
+        vertex_snapshot: DrawableVertexSnapshot::from_mesh(mesh),
         indices: mesh.indices().to_vec(),
         info: DrawableInfo::from_mesh(mesh),
     })
 }
 
-fn renderer_vertex_data_changed(drawable: &WgpuDrawableBuffers, mesh: &Moc3DrawableMesh) -> bool {
-    if drawable.vertex_count as usize != mesh.vertices().len() {
-        return true;
-    }
-    if drawable.vertex_bytes.len() != mesh.vertices().len() * DrawableVertex::STRIDE {
-        return true;
-    }
-
-    let opacity = mesh.opacity().to_ne_bytes();
-    let multiply = color_bytes(mesh.multiply_color());
-    let screen = color_bytes(mesh.screen_color());
-    drawable
-        .vertex_bytes
-        .as_chunks::<{ DrawableVertex::STRIDE }>()
-        .0
-        .iter()
-        .zip(mesh.vertices())
-        .any(|(bytes, vertex)| {
-            bytes[0..8] != vec2_bytes(vertex.position())
-                || bytes[8..16] != vec2_bytes(vertex.uv())
-                || bytes[16..20] != opacity
-                || bytes[20..32] != multiply
-                || bytes[32..44] != screen
-        })
-}
-
-fn vec2_bytes(values: [f32; 2]) -> [u8; 8] {
-    let mut bytes = [0; 8];
-    bytes[0..4].copy_from_slice(&values[0].to_ne_bytes());
-    bytes[4..8].copy_from_slice(&values[1].to_ne_bytes());
-    bytes
-}
-
-fn color_bytes(values: [f32; 3]) -> [u8; 12] {
-    let mut bytes = [0; 12];
-    bytes[0..4].copy_from_slice(&values[0].to_ne_bytes());
-    bytes[4..8].copy_from_slice(&values[1].to_ne_bytes());
-    bytes[8..12].copy_from_slice(&values[2].to_ne_bytes());
-    bytes
+fn color_bits(values: [f32; 3]) -> [u32; 3] {
+    values.map(f32::to_bits)
 }

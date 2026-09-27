@@ -155,11 +155,33 @@ impl Moc3DrawOrderGroups {
         part_offscreen_indices: &[i32],
         offscreen_count: usize,
     ) -> Option<Vec<i32>> {
+        let mut render_orders = Vec::with_capacity(self.drawable_count + offscreen_count);
+        self.render_orders_into(
+            drawable_draw_orders,
+            part_draw_orders,
+            part_enable,
+            part_offscreen_indices,
+            offscreen_count,
+            &mut render_orders,
+        )?;
+        Some(render_orders)
+    }
+
+    pub(crate) fn render_orders_into(
+        &self,
+        drawable_draw_orders: &[i32],
+        part_draw_orders: &[i32],
+        part_enable: &[bool],
+        part_offscreen_indices: &[i32],
+        offscreen_count: usize,
+        render_orders: &mut Vec<i32>,
+    ) -> Option<()> {
         if drawable_draw_orders.len() != self.drawable_count {
             return None;
         }
 
-        let mut render_orders = vec![0; self.drawable_count + offscreen_count];
+        render_orders.clear();
+        render_orders.resize(self.drawable_count + offscreen_count, 0);
         self.expand_group(
             0,
             0,
@@ -167,9 +189,8 @@ impl Moc3DrawOrderGroups {
             part_draw_orders,
             part_enable,
             part_offscreen_indices,
-            &mut render_orders,
-        )?;
-        Some(render_orders)
+            render_orders,
+        )
     }
 
     fn effective_draw_order(

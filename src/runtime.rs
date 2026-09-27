@@ -137,6 +137,11 @@ pub struct ModelRuntime {
     pose_opacities: Vec<f32>,
     meshes: Vec<Moc3DrawableMesh>,
     mesh_update_scratch: Moc3MeshUpdateScratch,
+    drawable_part_opacities: Vec<f32>,
+    drawable_draw_orders: Vec<i32>,
+    part_draw_orders: Vec<i32>,
+    part_enable: Vec<bool>,
+    render_orders: Vec<i32>,
 }
 
 impl ModelRuntime {
@@ -165,6 +170,7 @@ impl ModelRuntime {
         let parameter_index = build_index(ids.parameters());
         let part_index = build_index(ids.parts());
         let part_count = parts.part_count();
+        let drawable_count = art_meshes.meshes().len();
 
         let pose_fade_time = pose
             .as_ref()
@@ -201,6 +207,11 @@ impl ModelRuntime {
             pose_opacities,
             meshes: Vec::new(),
             mesh_update_scratch: Moc3MeshUpdateScratch::default(),
+            drawable_part_opacities: Vec::with_capacity(drawable_count),
+            drawable_draw_orders: Vec::with_capacity(drawable_count),
+            part_draw_orders: Vec::with_capacity(part_count),
+            part_enable: Vec::with_capacity(part_count),
+            render_orders: Vec::new(),
         };
         runtime.update_meshes()?;
         Some(runtime)
@@ -646,16 +657,22 @@ impl ModelRuntime {
         }
     }
 
-    fn drawable_part_opacities(&self) -> Vec<f32> {
-        (0..self.art_meshes.meshes().len())
-            .map(|drawable_index| {
-                self.offscreen
+    fn update_drawable_part_opacities(&mut self) {
+        let drawable_count = self.art_meshes.meshes().len();
+        let offscreen = &self.offscreen;
+        let part_opacities = &self.part_opacities;
+        let output = &mut self.drawable_part_opacities;
+        output.clear();
+        output.reserve(drawable_count.saturating_sub(output.capacity()));
+        for drawable_index in 0..drawable_count {
+            output.push(
+                offscreen
                     .drawable_parent_part_index(drawable_index)
-                    .and_then(|p| usize::try_from(p).ok())
-                    .and_then(|part_index| self.part_opacities.get(part_index).copied())
-                    .unwrap_or(1.0)
-            })
-            .collect()
+                    .and_then(|part| usize::try_from(part).ok())
+                    .and_then(|part_index| part_opacities.get(part_index).copied())
+                    .unwrap_or(1.0),
+            );
+        }
     }
 
     /// Rebuilds drawable meshes from the current runtime state.
@@ -665,12 +682,7 @@ impl ModelRuntime {
     /// when the model data cannot produce a valid mesh update.
     pub fn update_meshes(&mut self) -> Option<()> {
         self.update_part_opacities();
-        let drawable_part_opacities = self.drawable_part_opacities();
-        self.rebuild_or_update_meshes(&drawable_part_opacities)?;
-        self.apply_mesh_post_processing()
-    }
-
-    fn rebuild_or_update_meshes(&mut self, drawable_part_opacities: &[f32]) -> Option<()> {
+        self.update_drawable_part_opacities();
         if self.meshes.len() == self.art_meshes.meshes().len() {
             update_moc3_drawable_meshes_with_parameters_offscreen_and_part_opacities(
                 &mut self.meshes,
@@ -682,7 +694,7 @@ impl ModelRuntime {
                 &self.ids,
                 &self.offscreen,
                 &self.parameter_values,
-                drawable_part_opacities,
+                &self.drawable_part_opacities,
             )?;
         } else {
             self.meshes = build_moc3_drawable_meshes_with_parameters_offscreen_and_part_opacities(
@@ -693,10 +705,10 @@ impl ModelRuntime {
                 &self.ids,
                 &self.offscreen,
                 &self.parameter_values,
-                drawable_part_opacities,
+                &self.drawable_part_opacities,
             )?;
         }
-        Some(())
+        self.apply_mesh_post_processing()
     }
 
     fn apply_mesh_post_processing(&mut self) -> Option<()> {
@@ -710,35 +722,43 @@ impl ModelRuntime {
         let Some(groups) = self.draw_order_groups.as_ref() else {
             return;
         };
-        let drawable_draw_orders: Vec<i32> = self
-            .meshes
-            .iter()
-            .map(|mesh| draw_order_from_raw(mesh.draw_order()))
-            .collect();
+        self.drawable_draw_orders.clear();
+        self.drawable_draw_orders.extend(
+            self.meshes
+                .iter()
+                .map(|mesh| draw_order_from_raw(mesh.draw_order())),
+        );
 
         let part_count = self.parts.part_count();
-        let mut part_draw_orders = vec![0i32; part_count];
-        let mut part_enable = vec![false; part_count];
+        self.part_draw_orders.clear();
+        self.part_draw_orders.resize(part_count, 0);
+        self.part_enable.clear();
+        self.part_enable.resize(part_count, false);
+        self.part_enable.fill(false);
         for index in 0..part_count {
             if let Some(raw) =
                 self.parts
                     .interpolate_draw_order(index, &self.bindings, &self.parameter_values)
             {
-                part_draw_orders[index] = draw_order_from_raw(raw);
-                part_enable[index] = true;
+                self.part_draw_orders[index] = draw_order_from_raw(raw);
+                self.part_enable[index] = true;
             }
         }
 
-        let Some(render_orders) = groups.render_orders(
-            &drawable_draw_orders,
-            &part_draw_orders,
-            &part_enable,
-            self.offscreen.part_offscreen_indices(),
-            self.offscreen.offscreen_count(),
-        ) else {
+        if groups
+            .render_orders_into(
+                &self.drawable_draw_orders,
+                &self.part_draw_orders,
+                &self.part_enable,
+                self.offscreen.part_offscreen_indices(),
+                self.offscreen.offscreen_count(),
+                &mut self.render_orders,
+            )
+            .is_none()
+        {
             return;
-        };
-        for (mesh, render_order) in self.meshes.iter_mut().zip(&render_orders) {
+        }
+        for (mesh, render_order) in self.meshes.iter_mut().zip(&self.render_orders) {
             mesh.set_render_order(*render_order);
         }
     }

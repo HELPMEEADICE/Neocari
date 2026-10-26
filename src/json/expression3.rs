@@ -175,6 +175,78 @@ fn deserialize_expression_blend<'de, D>(
 where
     D: Deserializer<'de>,
 {
-    Option::<String>::deserialize(deserializer)
-        .map(|value| ExpressionBlend::from_raw(value.as_deref()))
+    use serde::de::Error as _;
+
+    // Cubism writes `Blend` as an integer (`0` add, `1` multiply, `2` overwrite);
+    // some exporters spell the mode out instead. Accept both so a model is not
+    // rejected over the encoding of one enum.
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(serde_json::Value::Null) => Ok(ExpressionBlend::Add),
+        Some(serde_json::Value::String(name)) => Ok(ExpressionBlend::from_raw(Some(&name))),
+        Some(serde_json::Value::Number(number)) => match number.as_u64() {
+            Some(0) => Ok(ExpressionBlend::Add),
+            Some(1) => Ok(ExpressionBlend::Multiply),
+            Some(2) => Ok(ExpressionBlend::Overwrite),
+            _ => Err(D::Error::custom(
+                "expression Blend must be 0 (add), 1 (multiply) or 2 (overwrite)",
+            )),
+        },
+        Some(_) => Err(D::Error::custom(
+            "expression Blend must be an integer or a blend name",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn blends(source: &str) -> Vec<ExpressionBlend> {
+        Expression3::from_json_str(source)
+            .unwrap()
+            .parameters()
+            .iter()
+            .map(ExpressionParameter::blend)
+            .collect()
+    }
+
+    #[test]
+    fn integer_blend_codes_follow_the_cubism_enum() {
+        let parsed = blends(
+            r#"{"Type":"Live2D Expression","Parameters":[
+                {"Id":"A","Value":1.0,"Blend":0},
+                {"Id":"B","Value":2.0,"Blend":1},
+                {"Id":"C","Value":3.0,"Blend":2},
+                {"Id":"D","Value":4.0}
+            ]}"#,
+        );
+        assert_eq!(
+            parsed,
+            [
+                ExpressionBlend::Add,
+                ExpressionBlend::Multiply,
+                ExpressionBlend::Overwrite,
+                ExpressionBlend::Add,
+            ]
+        );
+    }
+
+    #[test]
+    fn named_blends_still_parse() {
+        let parsed = blends(
+            r#"{"Type":"Live2D Expression","Parameters":[
+                {"Id":"A","Value":1.0,"Blend":"Overwrite"}
+            ]}"#,
+        );
+        assert_eq!(parsed, [ExpressionBlend::Overwrite]);
+    }
+
+    #[test]
+    fn an_unknown_blend_code_is_rejected() {
+        let error = Expression3::from_json_str(
+            r#"{"Type":"Live2D Expression","Parameters":[{"Id":"A","Value":1.0,"Blend":7}]}"#,
+        );
+        assert!(error.is_err());
+    }
 }

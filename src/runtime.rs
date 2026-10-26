@@ -574,6 +574,21 @@ impl ModelRuntime {
         true
     }
 
+    /// Returns the number of parts in the model.
+    pub fn part_count(&self) -> usize {
+        self.part_opacity_overrides.len()
+    }
+
+    /// Returns the part opacity override currently applied to a part.
+    ///
+    /// Overrides are cleared by [`reset_part_opacities`](Self::reset_part_opacities)
+    /// and written by motion `PartOpacity` curves, so this reports the per-frame
+    /// part state: `None` means the part keeps the opacity the pose system or the
+    /// art mesh declares.
+    pub fn part_opacity_override_by_index(&self, index: usize) -> Option<f32> {
+        self.part_opacity_overrides.get(index).copied().flatten()
+    }
+
     /// Clears all part opacity overrides.
     pub fn reset_part_opacities(&mut self) {
         self.part_opacity_overrides

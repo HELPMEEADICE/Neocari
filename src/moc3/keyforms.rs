@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::Result;
 
 use super::{
@@ -82,7 +84,7 @@ pub struct Moc3ArtMeshKeyforms {
     keyform_counts: Vec<i32>,
     vertex_counts: Vec<i32>,
     keyforms: Vec<Moc3ArtMeshKeyformInfo>,
-    position_xys: Vec<f32>,
+    position_xys: Arc<Vec<f32>>,
 }
 
 impl Moc3ArtMeshKeyforms {
@@ -117,7 +119,7 @@ impl Moc3ArtMeshKeyforms {
             keyform_counts,
             vertex_counts,
             keyforms,
-            position_xys,
+            position_xys: Arc::new(position_xys),
         })
     }
 
@@ -281,6 +283,12 @@ impl Moc3ArtMeshKeyforms {
 
     pub fn position_xys(&self) -> &[f32] {
         &self.position_xys
+    }
+
+    // Meshes and deformers index the same MOC3 section (slot 71). Keep one
+    // immutable allocation instead of decoding and retaining it twice.
+    pub(crate) fn shared_position_xys(&self) -> Arc<Vec<f32>> {
+        Arc::clone(&self.position_xys)
     }
 
     pub fn art_mesh_keyforms(&self, mesh_index: usize) -> Option<&[Moc3ArtMeshKeyformInfo]> {

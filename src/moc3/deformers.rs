@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::{Result, core::Vector2};
 
 use super::{
@@ -90,7 +92,7 @@ pub struct Moc3Deformers {
     rotation_keyform_reflect_xs: Vec<bool>,
     rotation_keyform_reflect_ys: Vec<bool>,
     rotation_keyform_opacities: Vec<f32>,
-    keyform_position_xys: Vec<f32>,
+    keyform_position_xys: Arc<Vec<f32>>,
     warp_keyform_color_begin_indices: Vec<i32>,
     rotation_keyform_color_begin_indices: Vec<i32>,
     keyform_multiply_colors: [Vec<f32>; 3],
@@ -99,6 +101,13 @@ pub struct Moc3Deformers {
 
 impl Moc3Deformers {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
+        Self::parse_with_positions(bytes, None)
+    }
+
+    pub(crate) fn parse_with_positions(
+        bytes: &[u8],
+        positions: Option<Arc<Vec<f32>>>,
+    ) -> Result<Self> {
         let header = Moc3Header::parse(bytes)?;
         let offsets = Moc3SectionOffsets::parse(bytes)?;
         let counts = Moc3CountInfo::parse(bytes)?;
@@ -276,13 +285,23 @@ impl Moc3Deformers {
                 endianness,
                 1.0,
             )?,
-            keyform_position_xys: read_f32_section(
-                bytes,
-                &offsets,
-                KEYFORM_POSITION_XYS_SLOT,
-                to_usize(counts.keyform_positions(), "keyform position count")?,
-                endianness,
-            )?,
+            keyform_position_xys: match positions {
+                Some(positions) => {
+                    if positions.len()
+                        != to_usize(counts.keyform_positions(), "keyform position count")?
+                    {
+                        return Err(invalid_moc3("shared keyform position count does not match"));
+                    }
+                    positions
+                }
+                None => Arc::new(read_f32_section(
+                    bytes,
+                    &offsets,
+                    KEYFORM_POSITION_XYS_SLOT,
+                    to_usize(counts.keyform_positions(), "keyform position count")?,
+                    endianness,
+                )?),
+            },
             warp_keyform_color_begin_indices: read_i32_section_or_default(
                 bytes,
                 &offsets,
@@ -660,4 +679,30 @@ fn compose_colors(
             local.1[channel] + parent.1[channel] - local.1[channel] * parent.1[channel];
     }
     (multiply, screen)
+}
+
+#[cfg(test)]
+mod memory_tests {
+    use super::*;
+    use crate::moc3::Moc3ArtMeshKeyforms;
+
+    #[test]
+    #[ignore = "set NEOCARI_TEST_MOC3 to a real .moc3 file"]
+    fn shared_positions_match_the_standalone_parser() {
+        let path = std::env::var_os("NEOCARI_TEST_MOC3").expect("set NEOCARI_TEST_MOC3");
+        let bytes = std::fs::read(path).unwrap();
+        let keyforms = Moc3ArtMeshKeyforms::parse(&bytes).unwrap();
+        let positions = keyforms.shared_position_xys();
+        let reference = Moc3Deformers::parse(&bytes).unwrap();
+        let shared =
+            Moc3Deformers::parse_with_positions(&bytes, Some(Arc::clone(&positions))).unwrap();
+        assert_eq!(reference, shared, "all float values must remain identical");
+        assert!(Arc::ptr_eq(&positions, &shared.keyform_position_xys));
+        assert!(Arc::ptr_eq(&positions, &keyforms.shared_position_xys()));
+        eprintln!(
+            "shared {} keyform coordinate bytes",
+            positions.len() * size_of::<f32>()
+        );
+        assert!(Moc3Deformers::parse_with_positions(&bytes, Some(Arc::new(vec![]))).is_err());
+    }
 }

@@ -229,6 +229,12 @@ impl Moc2RuntimeModel {
         &self.textures
     }
 
+    /// Transfers decoded pixels to the caller after GPU upload. Animation does
+    /// not use them; subsequent calls to `textures()` return an empty slice.
+    pub fn take_textures(&mut self) -> Vec<DecodedTexture> {
+        std::mem::take(&mut self.textures)
+    }
+
     /// Returns the folder containing the model settings JSON.
     pub fn model_dir(&self) -> Option<&Path> {
         self.model_dir.as_deref()
@@ -507,6 +513,12 @@ impl RuntimeModel {
         &self.textures
     }
 
+    /// Transfers decoded pixels to the caller after GPU upload. Animation does
+    /// not use them; subsequent calls to `textures()` return an empty slice.
+    pub fn take_textures(&mut self) -> Vec<DecodedTexture> {
+        std::mem::take(&mut self.textures)
+    }
+
     /// Returns the directory that contained the loaded `.model3.json` file.
     pub fn model_dir(&self) -> Option<&Path> {
         self.model_dir.as_deref()
@@ -600,7 +612,11 @@ fn parse_model(path: impl AsRef<Path>) -> Result<ParsedModel, AssetLoadError> {
 
     let art_meshes = Moc3ArtMeshes::parse(&moc).map_err(AssetLoadError::Moc3)?;
     let art_mesh_keyforms = Moc3ArtMeshKeyforms::parse(&moc).map_err(AssetLoadError::Moc3)?;
-    let deformers = Moc3Deformers::parse(&moc).map_err(AssetLoadError::Moc3)?;
+    let deformers = Moc3Deformers::parse_with_positions(
+        &moc,
+        Some(art_mesh_keyforms.shared_position_xys()),
+    )
+    .map_err(AssetLoadError::Moc3)?;
     let bindings = Moc3KeyformBindings::parse(&moc).map_err(AssetLoadError::Moc3)?;
     let ids = Moc3Ids::parse(&moc).map_err(AssetLoadError::Moc3)?;
     let offscreen = Moc3OffscreenInfo::parse(&moc).map_err(AssetLoadError::Moc3)?;
@@ -608,6 +624,9 @@ fn parse_model(path: impl AsRef<Path>) -> Result<ParsedModel, AssetLoadError> {
     let parts = Moc3Parts::parse(&moc).map_err(AssetLoadError::Moc3)?;
     let canvas = Moc3CanvasInfo::parse(&moc).map_err(AssetLoadError::Moc3)?;
     let draw_order_groups = Moc3DrawOrderGroups::parse(&moc).map_err(AssetLoadError::Moc3)?;
+    // Parsed runtime arrays own their data. Release the source file before PNG
+    // decoding and upload add their temporary allocations to the loading peak.
+    drop(moc);
     let physics = match model.physics() {
         Some(physics_file) => {
             let physics_source = read_text(&model_dir.join(physics_file))?;
@@ -687,7 +706,7 @@ fn decode_texture(path: impl AsRef<Path>) -> Result<DecodedTexture, AssetLoadErr
         path: path.display().to_string(),
         source,
     })?;
-    let rgba = image.to_rgba8();
+    let rgba = image.into_rgba8();
     Ok(DecodedTexture::new(
         rgba.width(),
         rgba.height(),

@@ -213,6 +213,7 @@ fn build_moc3_drawable_mesh_for_pose(
         })
         .collect();
 
+    let blend_mode = mesh.blend_mode();
     let mut mesh = Moc3DrawableMesh::from_parts_with_render_order(
         mesh.texture_index(),
         mesh.drawable_flags(),
@@ -223,6 +224,7 @@ fn build_moc3_drawable_mesh_for_pose(
         mesh.indices().to_vec(),
         mesh.masks().to_vec(),
     );
+    mesh.set_blend_mode(blend_mode);
     mesh.set_multiply_color(multiply_color);
     mesh.set_screen_color(screen_color);
     Some(mesh)

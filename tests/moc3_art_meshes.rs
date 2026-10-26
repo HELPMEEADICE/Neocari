@@ -261,6 +261,8 @@ mod moc3_drawable_mesh {
 
         assert_eq!(mesh.texture_index(), 2);
         assert_eq!(mesh.drawable_flags(), 0b0000_0100);
+        // Bit 2 is a constant flag, not the Cubism 2 `Screen` blend.
+        assert_eq!(mesh.blend_mode(), Moc3DrawableBlendMode::Normal);
         assert_eq!(mesh.opacity(), 0.8);
         assert_eq!(mesh.draw_order(), 500.0);
         assert_eq!(mesh.masks(), &[7]);

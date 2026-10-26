@@ -612,11 +612,9 @@ fn parse_model(path: impl AsRef<Path>) -> Result<ParsedModel, AssetLoadError> {
 
     let art_meshes = Moc3ArtMeshes::parse(&moc).map_err(AssetLoadError::Moc3)?;
     let art_mesh_keyforms = Moc3ArtMeshKeyforms::parse(&moc).map_err(AssetLoadError::Moc3)?;
-    let deformers = Moc3Deformers::parse_with_positions(
-        &moc,
-        Some(art_mesh_keyforms.shared_position_xys()),
-    )
-    .map_err(AssetLoadError::Moc3)?;
+    let deformers =
+        Moc3Deformers::parse_with_positions(&moc, Some(art_mesh_keyforms.shared_position_xys()))
+            .map_err(AssetLoadError::Moc3)?;
     let bindings = Moc3KeyformBindings::parse(&moc).map_err(AssetLoadError::Moc3)?;
     let ids = Moc3Ids::parse(&moc).map_err(AssetLoadError::Moc3)?;
     let offscreen = Moc3OffscreenInfo::parse(&moc).map_err(AssetLoadError::Moc3)?;

@@ -137,6 +137,9 @@ impl Moc3DrawableMesh {
 
     #[allow(clippy::too_many_arguments)]
     /// Creates a drawable mesh from raw parts with an explicit render order.
+    ///
+    /// Negative mask slots are dropped here: they can never name a drawable and
+    /// every renderer must ignore them.
     pub fn from_parts_with_render_order(
         texture_index: i32,
         drawable_flags: u8,
@@ -158,7 +161,7 @@ impl Moc3DrawableMesh {
             screen_color: [0.0, 0.0, 0.0],
             vertices,
             indices,
-            masks,
+            masks: renderable_masks(&masks, usize::MAX),
         }
     }
 
@@ -251,6 +254,24 @@ impl Moc3DrawableMesh {
     }
 }
 
+/// Drops mask slots that cannot name a drawable.
+///
+/// Cubism 5 conversions of game assets (`hotaru` / `casual_spring_01`) leave
+/// `-1` holes in the mask list of a drawable that is clipped by several masks:
+/// `[-1, -1, 68, -1, 105, 90, 91, 92, 93, 94]`. Cubism Core and the reference
+/// Lua runtime skip those slots and keep clipping with the valid ones, but a
+/// naive conversion forwards `-1` into the clipping plan, which then rejects
+/// the whole costume with `InvalidMaskDrawableIndex { drawable_index: -1 }`.
+/// Slots at or past `drawable_count` cannot resolve to a mask drawable either
+/// and are dropped for the same reason.
+fn renderable_masks(masks: &[i32], drawable_count: usize) -> Vec<i32> {
+    masks
+        .iter()
+        .copied()
+        .filter(|&index| usize::try_from(index).is_ok_and(|index| index < drawable_count))
+        .collect()
+}
+
 /// Builds one drawable mesh for an art mesh keyform.
 pub fn build_moc3_drawable_mesh(
     art_meshes: &Moc3ArtMeshes,
@@ -293,7 +314,10 @@ pub fn build_moc3_drawable_mesh(
         art_meshes.art_mesh_render_order(art_mesh_index)?,
         vertices,
         indices,
-        art_meshes.art_mesh_masks(art_mesh_index)?.to_vec(),
+        renderable_masks(
+            art_meshes.art_mesh_masks(art_mesh_index)?,
+            art_meshes.meshes().len(),
+        ),
     );
     drawable.set_blend_mode(Moc3DrawableBlendMode::from_moc3_flags(
         mesh.drawable_flags(),
@@ -323,6 +347,16 @@ pub fn build_moc3_drawable_meshes(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn drawable_mesh_drops_negative_mask_slots() {
+        // `-1` is an empty mask slot, not a drawable index. Callers that build a
+        // mesh by hand must not be able to poison the clipping plan with it.
+        let mesh =
+            Moc3DrawableMesh::from_parts(0, 0, 1.0, 0.0, Vec::new(), Vec::new(), vec![-1, 3, -2]);
+
+        assert_eq!(mesh.masks(), &[3]);
+    }
 
     #[test]
     fn moc3_constant_flag_is_not_decoded_as_screen_blend() {

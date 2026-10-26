@@ -241,11 +241,12 @@ mod moc3_drawable_mesh {
 
     #[test]
     fn builds_moc3_drawable_mesh_from_art_mesh_sections() {
+        // Mask slots must name an existing drawable; this model has one (`0`).
         let art_meshes = Moc3ArtMeshes::from_parts(
             vec![Moc3ArtMeshInfo::new(2, 0b0000_0100, 6, 0, 0, 4, 0, 1)],
             vec![0.0, 0.0, 1.0, 0.0, 1.0, 1.0, 0.0, 1.0],
             vec![0, 1, 2, 0, 2, 3],
-            vec![7],
+            vec![0],
         )
         .unwrap();
         let keyforms = Moc3ArtMeshKeyforms::from_parts(
@@ -265,13 +266,49 @@ mod moc3_drawable_mesh {
         assert_eq!(mesh.blend_mode(), Moc3DrawableBlendMode::Normal);
         assert_eq!(mesh.opacity(), 0.8);
         assert_eq!(mesh.draw_order(), 500.0);
-        assert_eq!(mesh.masks(), &[7]);
+        assert_eq!(mesh.masks(), &[0]);
         assert_eq!(mesh.indices(), &[0, 1, 2, 0, 2, 3]);
         assert_eq!(mesh.vertices().len(), 4);
         assert_eq!(mesh.vertices()[0].position(), [-1.0, -1.0]);
         assert_eq!(mesh.vertices()[0].uv(), [0.0, 0.0]);
         assert_eq!(mesh.vertices()[2].position(), [1.0, 1.0]);
         assert_eq!(mesh.vertices()[2].uv(), [1.0, 1.0]);
+    }
+
+    #[test]
+    fn drops_empty_and_out_of_range_mask_slots() {
+        // Cubism 5 conversions of game assets leave `-1` holes in the mask list
+        // of a multi-mask drawable (`hotaru` / `casual_spring_01`). Cubism Core
+        // skips them; forwarding them made the clipping plan reject the whole
+        // costume with `InvalidMaskDrawableIndex { drawable_index: -1 }`.
+        let art_meshes = Moc3ArtMeshes::from_parts(
+            vec![
+                // Every slot empty: the drawable must render unmasked.
+                Moc3ArtMeshInfo::new(0, 0, 3, 0, 0, 3, 0, 2),
+                // One real mask (0), one hole and one index past the last drawable.
+                Moc3ArtMeshInfo::new(0, 0, 3, 6, 3, 3, 2, 3),
+            ],
+            vec![0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0, 0.0, 0.0, 1.0],
+            vec![0, 1, 2, 0, 1, 2],
+            vec![-1, -1, -1, 0, 5],
+        )
+        .unwrap();
+        let keyforms = Moc3ArtMeshKeyforms::from_parts(
+            vec![0, 1],
+            vec![1, 1],
+            vec![3, 3],
+            vec![
+                Moc3ArtMeshKeyformInfo::new(1.0, 0.0, 0),
+                Moc3ArtMeshKeyformInfo::new(1.0, 10.0, 6),
+            ],
+            vec![0.0; 12],
+        )
+        .unwrap();
+
+        let meshes = build_moc3_drawable_meshes(&art_meshes, &keyforms).unwrap();
+
+        assert!(meshes[0].masks().is_empty());
+        assert_eq!(meshes[1].masks(), &[0]);
     }
 
     #[test]

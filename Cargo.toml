@@ -35,6 +35,10 @@ required-features = ["wgpu"]
 name = "render_moc2"
 required-features = ["wgpu"]
 
+[[example]]
+name = "render_moc2_animation"
+required-features = ["wgpu"]
+
 [[test]]
 name = "wgpu_renderer"
 required-features = ["wgpu"]

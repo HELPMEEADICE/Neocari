@@ -10,12 +10,17 @@ Neocari is an unofficial and independent community project. It is not affiliated
 
 ## Features
 
-- Parse and render Cubism V2 `.moc` models at their declared default parameter values.
+- Full Cubism V2 (`.moc`) runtime:
+  - parameter pivot tables with multi-axis interpolation and outside-range handling
+  - warp and rotation deformers with parent hierarchies, scale, opacity, and extrapolation
+  - part visibilities, part opacity, draw order, clipping masks, and blend modes
+  - `.mtn` motion playback with fade in/out, priorities, and smoothing
+  - `.exp` expressions with add, multiply, and overwrite blending
+  - `.physics` hair chains, `.pose` part fading, automatic eye blinking, and breathing
+- Parse and render Cubism V2 `.moc` models at their default parameters.
 - Load Cubism V2 model settings JSON and referenced PNG textures.
 - Render Cubism V3/V4/V5 `.moc3` models and use the parameter, motion, expression, and physics runtime.
 - Use the built-in `wgpu` renderer or provide a custom backend through `render::common`.
-
-Cubism V2 motion playback and interactive V2 parameter updates are not implemented yet.
 
 ## Build from source
 
@@ -42,11 +47,62 @@ neocari = { git = "https://github.com/HELPMEEADICE/Neocari", features = ["wgpu"]
 
 ## Render a Cubism V2 model
 
-The `assets::load_moc2_model` loader accepts a Cubism V2 model settings JSON and loads its `.moc` file and PNG textures. The generated meshes can be passed to the same WGPU renderer used for Cubism V3. For V2's fixed default-pose meshes, use
-`WgpuMeshBuffers::from_static_drawables` to pack geometry into shared GPU buffers and avoid update snapshots.
+`assets::load_moc2_model` loads a Cubism V2 model settings JSON with its `.moc`
+file and PNG textures and produces default-pose drawables. For animation use
+`assets::load_moc2_runtime`, which also loads the physics and pose files declared
+by the settings and returns a `Moc2RuntimeModel`:
+
+```rust
+use neocari::assets::load_moc2_runtime;
+
+fn animate() -> Result<(), Box<dyn std::error::Error>> {
+    let mut model = load_moc2_runtime("path/to/model.model.json")?;
+    model.play_motion("idle", 0)?;      // .mtn motion declared by the settings file
+    model.play_expression("smile")?;    // .exp expression declared by the settings file
+    model.runtime_mut().set_drag(0.25, -0.1);
+
+    for _ in 0..60 {
+        model.update(1.0 / 60.0);
+        for mesh in model.meshes() {
+            // Upload mesh.vertices()/indices() and draw with the shared drawable renderer.
+        }
+    }
+    Ok(())
+}
+```
+
+The runtime reproduces the Cubism V2 update pipeline: part/pose state, motions
+with fade windows and priorities, automatic blinking, expressions, drag/breath
+offsets, hair physics, pose fading, then deformer and drawable evaluation.
+
+`Moc2Runtime` can also be driven directly when motion and expression files are
+loaded elsewhere:
+
+```rust
+use std::sync::Arc;
+use neocari::moc2::{Moc2Motion, Moc2Runtime};
+
+fn play(runtime: &mut Moc2Runtime, motion: Moc2Motion) {
+    runtime.start_motion(Arc::new(motion), 500.0, 500.0);
+    runtime.update(1.0 / 60.0);
+}
+```
+
+The `assets::load_moc2_model` loader can still be used for previews and import
+tools. For those fixed default-pose meshes, `WgpuMeshBuffers::from_static_drawables`
+packs geometry into shared GPU buffers and avoids update snapshots.
+
+Render a static frame:
 
 ```bash
 cargo run --features wgpu --example render_moc2 -- path/to/model.model.json output.png
+```
+
+Render animation frames (motion, expression, physics, blinking, and breathing):
+
+```bash
+cargo run --features wgpu --example render_moc2_animation -- \
+    path/to/model.model.json frame.png --motion idle01 --expression smile01 --frames 30
 ```
 
 ## License

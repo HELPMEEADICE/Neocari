@@ -25,6 +25,10 @@ impl Moc3DrawableVertex {
         self.position
     }
 
+    pub(crate) fn set_position(&mut self, position: [f32; 2]) {
+        self.position = position;
+    }
+
     /// Returns the texture coordinate.
     pub fn uv(&self) -> [f32; 2] {
         self.uv

@@ -6,7 +6,12 @@
 //!
 //! - [`assets`] loads a `.model3.json` file, its referenced `.moc3` data, pose
 //!   file, and PNG textures from disk.
-//! - `assets::load_moc2_model` loads Cubism 2 settings and .moc data into default-pose drawables.
+//! - [`moc2`] parses Cubism 2 `.moc` files and drives their full runtime:
+//!   parameters, deformers, clipping, motions, expressions, physics, pose
+//!   fading, eye blinking, and breathing.
+//! - `assets::load_moc2_model` loads Cubism 2 settings and .moc data into
+//!   default-pose drawables; `assets::load_moc2_runtime` loads the animated
+//!   runtime with physics, pose, motions, and expressions.
 //! - [`ModelRuntime`] owns the mutable model state used by motions, expressions,
 //!   pose fading, and drawable mesh generation.
 //! - [`motion`] and [`expression`] provide lightweight players for Cubism motion

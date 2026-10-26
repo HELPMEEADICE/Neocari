@@ -77,6 +77,11 @@ impl Matrix44 {
         }
     }
 
+    /// Builds a matrix from a column-major 4x4 array.
+    pub fn from_values(values: [f32; 16]) -> Self {
+        Self { values }
+    }
+
     pub fn as_slice(&self) -> &[f32; 16] {
         &self.values
     }
@@ -93,6 +98,13 @@ impl Matrix44 {
         }
 
         result
+    }
+
+    /// Multiplies two matrices and returns `left * right`.
+    ///
+    /// Both matrices use the column-major layout used by the renderer.
+    pub fn multiply_matrices(left: &Self, right: &Self) -> Self {
+        Self::from_values(Self::multiply(right.as_slice(), left.as_slice()))
     }
 
     pub fn translate_relative(&mut self, x: f32, y: f32) {
@@ -271,5 +283,26 @@ impl ModelMatrix {
 
     pub fn matrix(&self) -> &Matrix44 {
         &self.matrix
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matrix_multiplication_applies_the_right_matrix_first() {
+        let mut translate = Matrix44::identity();
+        translate.translate(1.0, 0.0);
+        let mut scale = Matrix44::identity();
+        scale.scale(2.0, 3.0);
+
+        let combined = Matrix44::multiply_matrices(&translate, &scale);
+        assert_eq!(combined.transform_x(0.0), 1.0);
+        assert_eq!(combined.transform_x(1.0), 3.0);
+        assert_eq!(combined.transform_y(1.0), 3.0);
+
+        let reversed = Matrix44::multiply_matrices(&scale, &translate);
+        assert_eq!(reversed.transform_x(0.0), 2.0);
     }
 }

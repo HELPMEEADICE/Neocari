@@ -5,17 +5,21 @@
 //! when the application needs per-frame parameter, motion, or expression updates.
 //! Use [`crate::assets::load_model`] for a static default-pose snapshot.
 
-use serde::Deserialize;
-
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
+    sync::Arc,
     thread,
 };
 
 use crate::{
+    core::Matrix44,
     json::{Model3, Physics3, Pose3},
-    moc2::{Moc2Error, Moc2Model},
+    moc2::{
+        Moc2Error, Moc2Expression, Moc2Model, Moc2Motion, Moc2Physics, Moc2Pose, Moc2Runtime,
+        Moc2Settings,
+    },
     moc3::{
         Moc3ArtMeshKeyforms, Moc3ArtMeshes, Moc3CanvasInfo, Moc3Deformers, Moc3DrawOrderGroups,
         Moc3DrawableMesh, Moc3Glues, Moc3Ids, Moc3KeyformBindings, Moc3OffscreenInfo, Moc3Parts,
@@ -120,6 +124,15 @@ pub enum AssetLoadError {
     /// A Cubism 2 model settings JSON file was malformed.
     #[error("failed to parse model2 json: {message}")]
     Moc2Json { message: String },
+    /// A Cubism 2 sidecar file could not be parsed.
+    #[error("failed to parse Cubism 2 {format}: {source}")]
+    Moc2File {
+        /// Human-readable format name, such as `mtn` or `exp`.
+        format: &'static str,
+        /// Original parse error.
+        #[source]
+        source: Moc2Error,
+    },
     /// The referenced MOC file was invalid or unsupported.
     #[error("failed to parse moc2: {0}")]
     Moc2(#[source] Moc2Error),
@@ -147,6 +160,7 @@ pub enum AssetLoadError {
 /// A Cubism 2 model with its decoded textures and default-pose meshes.
 pub struct LoadedMoc2Model {
     model: Moc2Model,
+    settings: Moc2Settings,
     textures: Vec<DecodedTexture>,
     model_dir: Option<PathBuf>,
 }
@@ -155,6 +169,10 @@ impl LoadedMoc2Model {
     /// Returns parsed MOC2 data and renderer-ready drawables.
     pub fn model(&self) -> &Moc2Model {
         &self.model
+    }
+    /// Returns the parsed `.model.json` settings.
+    pub fn settings(&self) -> &Moc2Settings {
+        &self.settings
     }
     /// Returns renderer-ready drawables in model order.
     pub fn drawables(&self) -> &[Moc3DrawableMesh] {
@@ -174,12 +192,182 @@ impl LoadedMoc2Model {
     }
 }
 
-#[derive(Deserialize)]
-struct Model2Manifest {
-    #[serde(alias = "Model")]
-    model: String,
-    #[serde(default, alias = "Textures")]
-    textures: Vec<String>,
+#[derive(Debug)]
+/// A Cubism 2 model loaded for animation.
+///
+/// The runtime model owns the decoded textures, the parsed settings, the
+/// animation runtime, and a cache of loaded motions and expressions. Use
+/// [`play_motion`](Self::play_motion) and [`play_expression`](Self::play_expression)
+/// to start animation, then call [`update`](Self::update) every frame.
+pub struct Moc2RuntimeModel {
+    runtime: Moc2Runtime,
+    settings: Moc2Settings,
+    textures: Vec<DecodedTexture>,
+    model_dir: Option<PathBuf>,
+    motions: HashMap<String, Arc<Moc2Motion>>,
+    expressions: HashMap<String, Arc<Moc2Expression>>,
+}
+
+impl Moc2RuntimeModel {
+    /// Returns the immutable runtime state.
+    pub fn runtime(&self) -> &Moc2Runtime {
+        &self.runtime
+    }
+
+    /// Returns the mutable runtime state.
+    pub fn runtime_mut(&mut self) -> &mut Moc2Runtime {
+        &mut self.runtime
+    }
+
+    /// Returns the parsed `.model.json` settings.
+    pub fn settings(&self) -> &Moc2Settings {
+        &self.settings
+    }
+
+    /// Returns decoded RGBA8 textures in manifest order.
+    pub fn textures(&self) -> &[DecodedTexture] {
+        &self.textures
+    }
+
+    /// Returns the folder containing the model settings JSON.
+    pub fn model_dir(&self) -> Option<&Path> {
+        self.model_dir.as_deref()
+    }
+
+    /// Returns the model-to-clip-space matrix declared by the model layout.
+    pub fn model_matrix(&self) -> Matrix44 {
+        self.runtime.model_matrix()
+    }
+
+    /// Advances the model by `delta_seconds`.
+    pub fn update(&mut self, delta_seconds: f32) -> Option<()> {
+        self.runtime.update(delta_seconds)
+    }
+
+    /// Returns the drawable meshes in model order.
+    pub fn meshes(&self) -> &[Moc3DrawableMesh] {
+        self.runtime.meshes()
+    }
+
+    /// Starts one of the motions declared by the settings file.
+    ///
+    /// Motions are cached by group and index. Returns `Ok(false)` when the
+    /// reference does not name a motion file.
+    pub fn play_motion(&mut self, group: &str, index: usize) -> Result<bool, AssetLoadError> {
+        let reference = self
+            .settings
+            .motions(group)
+            .and_then(|motions| motions.get(index))
+            .ok_or_else(|| AssetLoadError::Moc2Json {
+                message: format!("motion group '{group}' has no entry {index}"),
+            })?;
+        let Some(file) = reference.file() else {
+            return Ok(false);
+        };
+        let key = format!("{group}#{index}");
+
+        let motion = match self.motions.get(&key) {
+            Some(motion) => Arc::clone(motion),
+            None => {
+                let path = self.resolve(file);
+                let bytes = read_bytes(&path)?;
+                let motion = Arc::new(Moc2Motion::from_bytes(&bytes).map_err(|source| {
+                    AssetLoadError::Moc2File {
+                        format: "mtn",
+                        source,
+                    }
+                })?);
+                self.motions.insert(key, Arc::clone(&motion));
+                motion
+            }
+        };
+
+        self.runtime
+            .start_motion(motion, reference.fade_in_ms(), reference.fade_out_ms());
+        Ok(true)
+    }
+
+    /// Starts the first motion of a group.
+    pub fn play_motion_group(&mut self, group: &str) -> Result<bool, AssetLoadError> {
+        self.play_motion(group, 0)
+    }
+
+    /// Returns the motion group names declared by the settings file.
+    pub fn motion_groups(&self) -> impl Iterator<Item = &str> {
+        self.settings.motion_groups().keys().map(String::as_str)
+    }
+
+    /// Starts an expression declared by the settings file.
+    ///
+    /// Expressions are cached by name. Returns `Ok(false)` when no expression
+    /// with that name exists.
+    pub fn play_expression(&mut self, name: &str) -> Result<bool, AssetLoadError> {
+        let Some(file) = self.settings.expression_file(name) else {
+            return Ok(false);
+        };
+
+        let expression = match self.expressions.get(name) {
+            Some(expression) => Arc::clone(expression),
+            None => {
+                let path = self.resolve(file);
+                let source = read_text(&path)?;
+                let expression =
+                    Arc::new(Moc2Expression::from_json_str(&source).map_err(|source| {
+                        AssetLoadError::Moc2File {
+                            format: "exp",
+                            source,
+                        }
+                    })?);
+                self.expressions
+                    .insert(name.to_owned(), Arc::clone(&expression));
+                expression
+            }
+        };
+
+        self.runtime.start_expression(expression);
+        Ok(true)
+    }
+
+    /// Returns the expression names declared by the settings file.
+    pub fn expression_names(&self) -> impl Iterator<Item = &str> {
+        self.settings
+            .expressions()
+            .iter()
+            .map(crate::moc2::Moc2ExpressionReference::name)
+    }
+
+    /// Returns the hit area name containing a model-space point.
+    ///
+    /// When the drawable is not referenced by a named hit area the drawable id is
+    /// returned instead.
+    pub fn hit_test(&self, x: f32, y: f32) -> Option<&str> {
+        let id = self.runtime.hit_test(x, y)?;
+        Some(
+            self.settings
+                .hit_areas()
+                .iter()
+                .find(|area| area.id() == id)
+                .map_or(id, |area| area.name()),
+        )
+    }
+
+    fn resolve(&self, file: &str) -> PathBuf {
+        let mut path = self.model_dir.clone().unwrap_or_default();
+        for component in file.replace('\\', "/").split('/') {
+            if !component.is_empty() {
+                path.push(component);
+            }
+        }
+        path
+    }
+}
+
+fn read_moc2_settings(path: &Path) -> Result<Moc2Settings, AssetLoadError> {
+    let source = read_text(path)?;
+    Moc2Settings::from_json_str(&source).map_err(|source| AssetLoadError::Moc2File {
+        format: "model.json",
+        source,
+    })
 }
 
 /// Loads a Cubism 2 model settings JSON, its referenced MOC file, and textures.
@@ -191,26 +379,86 @@ pub fn load_moc2_model(path: impl AsRef<Path>) -> Result<LoadedMoc2Model, AssetL
     let model_dir = path.parent().ok_or_else(|| AssetLoadError::MissingParent {
         path: path.display().to_string(),
     })?;
-    let source = read_text(path)?;
-    let manifest: Model2Manifest =
-        serde_json::from_str(&source).map_err(|error| AssetLoadError::Moc2Json {
-            message: error.to_string(),
+    let settings = read_moc2_settings(path)?;
+    let model_file = settings
+        .model_file()
+        .ok_or_else(|| AssetLoadError::Moc2Json {
+            message: "model settings have no model file".to_owned(),
         })?;
-    let moc_path = model_dir.join(manifest.model.replace('\\', "/"));
-    let moc_bytes = read_bytes(&moc_path)?;
+    let moc_bytes = read_bytes(&model_dir.join(model_file.replace('\\', "/")))?;
     let model = Moc2Model::from_bytes(&moc_bytes).map_err(AssetLoadError::Moc2)?;
-    let texture_paths = manifest
-        .textures
-        .iter()
-        .map(|path| path.replace('\\', "/"))
-        .collect::<Vec<_>>();
-    let textures = decode_textures(model_dir, &texture_paths)?;
+    let textures = decode_textures(model_dir, settings.texture_files())?;
     Ok(LoadedMoc2Model {
         model,
+        settings,
         textures,
         model_dir: Some(model_dir.to_path_buf()),
     })
 }
+
+/// Loads a Cubism 2 model with its physics, pose, and animation runtime.
+///
+/// The loader applies `init_params`, `init_parts_visible`, physics, and pose
+/// data declared by the settings file, then stores the resulting state as the
+/// animation base. Motions and expressions are loaded lazily by
+/// [`Moc2RuntimeModel::play_motion`] and [`Moc2RuntimeModel::play_expression`].
+pub fn load_moc2_runtime(path: impl AsRef<Path>) -> Result<Moc2RuntimeModel, AssetLoadError> {
+    let path = path.as_ref();
+    let model_dir = path.parent().ok_or_else(|| AssetLoadError::MissingParent {
+        path: path.display().to_string(),
+    })?;
+    let settings = read_moc2_settings(path)?;
+    let model_file = settings
+        .model_file()
+        .ok_or_else(|| AssetLoadError::Moc2Json {
+            message: "model settings have no model file".to_owned(),
+        })?;
+    let moc_bytes = read_bytes(&model_dir.join(model_file.replace('\\', "/")))?;
+    let model = Moc2Model::from_bytes(&moc_bytes).map_err(AssetLoadError::Moc2)?;
+
+    let mut runtime = Moc2Runtime::new(model.into_scene()).ok_or(AssetLoadError::DrawableMeshes)?;
+
+    for parameter in settings.init_params() {
+        runtime.set_parameter(parameter.id(), parameter.value());
+    }
+    for part in settings.init_parts_visible() {
+        runtime.set_part_opacity(part.id(), part.value());
+    }
+
+    if let Some(physics_file) = settings.physics_file() {
+        let source = read_text(&model_dir.join(physics_file.replace('\\', "/")))?;
+        let physics =
+            Moc2Physics::from_json_str(&source).map_err(|source| AssetLoadError::Moc2File {
+                format: "physics",
+                source,
+            })?;
+        runtime.set_physics(physics);
+    }
+
+    if let Some(pose_file) = settings.pose_file() {
+        let source = read_text(&model_dir.join(pose_file.replace('\\', "/")))?;
+        let pose = Moc2Pose::from_json_str(&source).map_err(|source| AssetLoadError::Moc2File {
+            format: "pose",
+            source,
+        })?;
+        runtime.set_pose(pose);
+    }
+
+    runtime.set_layout(settings.layout().clone());
+    runtime.save_parameters();
+
+    let textures = decode_textures(model_dir, settings.texture_files())?;
+
+    Ok(Moc2RuntimeModel {
+        runtime,
+        settings,
+        textures,
+        model_dir: Some(model_dir.to_path_buf()),
+        motions: HashMap::new(),
+        expressions: HashMap::new(),
+    })
+}
+
 /// Loads a model as a static default-pose snapshot.
 ///
 /// The `path` should point to a `.model3.json` file. Neocari reads the referenced

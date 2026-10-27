@@ -139,8 +139,9 @@ impl DrawableVertexSnapshot {
 }
 
 impl WgpuDrawableBuffers {
-    /// Returns the GPU resource containing this drawable's vertices. Static mesh
-    /// buffers can share this resource with other drawables.
+    /// Returns the GPU resource containing this drawable's vertices. Mesh buffers
+    /// share this resource with other drawables; use `vertex_buffer_slice()` for
+    /// this drawable's range.
     pub fn vertex_buffer(&self) -> &wgpu::Buffer {
         &self.vertex_buffer
     }
@@ -150,8 +151,8 @@ impl WgpuDrawableBuffers {
         self.vertex_buffer.slice(self.vertex_range.clone())
     }
 
-    /// Returns the GPU resource containing this drawable's indices. Static mesh
-    /// buffers can share this resource with other drawables.
+    /// Returns the shared GPU resource containing this drawable's indices. Use
+    /// `index_buffer_slice()` for this drawable's range.
     pub fn index_buffer(&self) -> &wgpu::Buffer {
         &self.index_buffer
     }
@@ -293,25 +294,30 @@ pub enum WgpuMeshUpdateError {
 }
 
 impl WgpuMeshBuffers {
+    /// Packs animated geometry into two shared allocations, retaining the same
+    /// per-drawable snapshots and update validation as standalone buffers.
     pub fn from_drawables(device: &wgpu::Device, meshes: &[Moc3DrawableMesh]) -> Option<Self> {
-        let mut drawables = Vec::with_capacity(meshes.len());
-        for mesh in meshes {
-            drawables.push(create_wgpu_drawable_buffers(device, mesh)?);
-        }
-        let draw_order_indices = draw_order_indices_from(
-            drawables.len(),
-            |index| drawables[index].draw_order(),
-            |index| drawables[index].render_order(),
-        );
-
-        Some(Self {
-            render_order_seen: Vec::with_capacity(drawables.len()),
-            vertex_upload_bytes: Vec::new(),
-            drawables,
-            draw_order_indices,
-            packed_vertex_buffer: None,
-            packed_index_buffer: None,
-            static_geometry: false,
+        Self::from_packed_drawables(device, meshes, false).or_else(|| {
+            // Very large models can exceed a single buffer's device limit even
+            // though every individual drawable fits. Preserve that support.
+            let drawables = meshes
+                .iter()
+                .map(|mesh| create_wgpu_drawable_buffers(device, mesh))
+                .collect::<Option<Vec<_>>>()?;
+            let draw_order_indices = draw_order_indices_from(
+                drawables.len(),
+                |i| drawables[i].draw_order(),
+                |i| drawables[i].render_order(),
+            );
+            Some(Self {
+                render_order_seen: Vec::with_capacity(drawables.len()),
+                vertex_upload_bytes: Vec::new(),
+                drawables,
+                draw_order_indices,
+                packed_vertex_buffer: None,
+                packed_index_buffer: None,
+                static_geometry: false,
+            })
         })
     }
 
@@ -322,6 +328,14 @@ impl WgpuMeshBuffers {
     pub fn from_static_drawables(
         device: &wgpu::Device,
         meshes: &[Moc3DrawableMesh],
+    ) -> Option<Self> {
+        Self::from_packed_drawables(device, meshes, true)
+    }
+
+    fn from_packed_drawables(
+        device: &wgpu::Device,
+        meshes: &[Moc3DrawableMesh],
+        static_geometry: bool,
     ) -> Option<Self> {
         let (vertex_byte_len, index_byte_len) =
             meshes
@@ -391,29 +405,37 @@ impl WgpuMeshBuffers {
         };
         let vertex_buffer = Arc::new(device.create_buffer_init(
             &wgpu::util::BufferInitDescriptor {
-                label: Some("live2d.static.vertices"),
+                label: Some("live2d.packed.vertices"),
                 contents: vertex_contents,
-                usage: wgpu::BufferUsages::VERTEX,
+                usage: if static_geometry {
+                    wgpu::BufferUsages::VERTEX
+                } else {
+                    wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST
+                },
             },
         ));
         let index_buffer = Arc::new(
             device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("live2d.static.indices"),
+                label: Some("live2d.packed.indices"),
                 contents: index_contents,
                 usage: wgpu::BufferUsages::INDEX,
             }),
         );
         let drawables = layouts
             .into_iter()
+            .zip(meshes)
             .map(
                 |(
-                    vertex_range,
-                    index_range,
-                    first_index,
-                    base_vertex,
-                    vertex_count,
-                    index_count,
-                    info,
+                    (
+                        vertex_range,
+                        index_range,
+                        first_index,
+                        base_vertex,
+                        vertex_count,
+                        index_count,
+                        info,
+                    ),
+                    mesh,
                 )| {
                     WgpuDrawableBuffers {
                         vertex_buffer: Arc::clone(&vertex_buffer),
@@ -424,8 +446,9 @@ impl WgpuMeshBuffers {
                         base_vertex,
                         vertex_count,
                         index_count,
-                        vertex_snapshot: None,
-                        indices: None,
+                        vertex_snapshot: (!static_geometry)
+                            .then(|| DrawableVertexSnapshot::from_mesh(mesh)),
+                        indices: (!static_geometry).then(|| mesh.indices().to_vec()),
                         info,
                     }
                 },
@@ -444,7 +467,7 @@ impl WgpuMeshBuffers {
             draw_order_indices,
             packed_vertex_buffer: Some(vertex_buffer),
             packed_index_buffer: Some(index_buffer),
-            static_geometry: true,
+            static_geometry,
         })
     }
 
@@ -685,4 +708,215 @@ pub fn create_wgpu_drawable_buffers(
 
 fn color_bits(values: [f32; 3]) -> [u32; 3] {
     values.map(f32::to_bits)
+}
+
+#[cfg(test)]
+mod packed_tests {
+    use super::*;
+    use crate::{core::Matrix44, moc3::Moc3DrawableVertex, render::wgpu::*};
+
+    // Keep the old allocation path as an independent rendering reference.
+    fn unpacked(device: &wgpu::Device, meshes: &[Moc3DrawableMesh]) -> WgpuMeshBuffers {
+        let drawables = meshes
+            .iter()
+            .map(|mesh| create_wgpu_drawable_buffers(device, mesh).unwrap())
+            .collect();
+        WgpuMeshBuffers {
+            drawables,
+            draw_order_indices: draw_order_indices_from(
+                meshes.len(),
+                |i| meshes[i].draw_order(),
+                |i| meshes[i].render_order(),
+            ),
+            render_order_seen: Vec::new(),
+            vertex_upload_bytes: Vec::new(),
+            packed_vertex_buffer: None,
+            packed_index_buffer: None,
+            static_geometry: false,
+        }
+    }
+
+    fn scene(frame: usize) -> Vec<Moc3DrawableMesh> {
+        (0..4)
+            .map(|i| {
+                let shift = frame as f32 * 0.07;
+                let x = -0.8 + i as f32 * 0.35 + shift;
+                Moc3DrawableMesh::from_parts(
+                    (i % 2) as i32,
+                    0,
+                    if i == 1 || (i == 3 && frame == 0) {
+                        0.0
+                    } else {
+                        0.4 + shift
+                    },
+                    if frame == 2 { (4 - i) as f32 } else { i as f32 },
+                    vec![
+                        Moc3DrawableVertex::new([x, -0.8], [0.0, 1.0]),
+                        Moc3DrawableVertex::new([x + 0.6, -0.8 + shift], [1.0, 1.0]),
+                        Moc3DrawableVertex::new([x + 0.3, 0.9], [0.5, shift]),
+                    ],
+                    // Odd index counts exercise non-four-byte-aligned index ranges.
+                    vec![0, 1, 2],
+                    if i == 0 { vec![1] } else { vec![] },
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn oversized_packed_buffer_keeps_the_per_drawable_fallback() {
+        let (device, queue) = wgpu::Device::noop(&wgpu::DeviceDescriptor {
+            required_limits: wgpu::Limits {
+                max_buffer_size: 256,
+                ..Default::default()
+            },
+            ..Default::default()
+        });
+        let mut buffers = WgpuMeshBuffers::from_drawables(&device, &scene(0)).unwrap();
+        assert!(buffers.packed_buffers().is_none());
+        assert_eq!(
+            buffers
+                .update_drawables(&queue, &scene(1))
+                .unwrap()
+                .uploaded_drawables(),
+            4
+        );
+    }
+
+    fn pixels(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        renderer: &WgpuLive2dRenderer,
+        buffers: &WgpuMeshBuffers,
+        textures: &[WgpuTexture],
+    ) -> Vec<u8> {
+        let mut plan = WgpuClippingPlan::from_mesh_buffers(buffers);
+        plan.prepare_single_texture_masks(buffers).unwrap();
+        let clipping = renderer.create_clipping_resources(device, &plan).unwrap();
+        let mask = renderer.create_mask_render_target(device, 256).unwrap();
+        let transform = renderer.create_transform(device, &Matrix44::identity());
+        let target = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("packed-regression.target"),
+            size: wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        let view = target.create_view(&Default::default());
+        let readback = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("packed-regression.readback"),
+            size: 64 * 64 * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = device.create_command_encoder(&Default::default());
+        for mask_pass in [true, false] {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: None,
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: if mask_pass { mask.view() } else { &view },
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            if mask_pass {
+                renderer.draw_masks_with_textures(&mut pass, buffers, &clipping, textures)
+            } else {
+                renderer.draw_with_textures_clipping_and_transform(
+                    &mut pass, buffers, textures, &clipping, &mask, &transform,
+                )
+            }
+            .unwrap();
+        }
+        encoder.copy_texture_to_buffer(
+            target.as_image_copy(),
+            wgpu::TexelCopyBufferInfo {
+                buffer: &readback,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(256),
+                    rows_per_image: Some(64),
+                },
+            },
+            wgpu::Extent3d {
+                width: 64,
+                height: 64,
+                depth_or_array_layers: 1,
+            },
+        );
+        queue.submit([encoder.finish()]);
+        let (tx, rx) = std::sync::mpsc::channel();
+        readback.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            tx.send(r).unwrap();
+        });
+        device.poll(wgpu::PollType::wait_indefinitely()).unwrap();
+        rx.recv().unwrap().unwrap();
+        let result = readback.slice(..).get_mapped_range().unwrap().to_vec();
+        readback.unmap();
+        result
+    }
+
+    #[test]
+    #[ignore = "requires a real GPU; checks rendered bytes against separate drawable buffers"]
+    fn packed_animation_matches_unpacked_pixels() {
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let adapter = pollster::block_on(instance.request_adapter(&Default::default())).unwrap();
+        let (device, queue) =
+            pollster::block_on(adapter.request_device(&Default::default())).unwrap();
+        let renderer = WgpuLive2dRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let textures = [
+            renderer
+                .create_rgba8_texture(
+                    &device,
+                    &queue,
+                    2,
+                    2,
+                    &[
+                        255, 32, 16, 255, 32, 255, 16, 127, 16, 32, 255, 80, 255, 255, 255, 0,
+                    ],
+                )
+                .unwrap(),
+            renderer
+                .create_rgba8_texture(&device, &queue, 1, 1, &[32, 192, 255, 200])
+                .unwrap(),
+        ];
+        let meshes = scene(0);
+        let mut packed = WgpuMeshBuffers::from_drawables(&device, &meshes).unwrap();
+        let mut reference = unpacked(&device, &meshes);
+        assert!(Arc::ptr_eq(
+            &packed.drawables[0].vertex_buffer,
+            &packed.drawables[3].vertex_buffer
+        ));
+        assert!(Arc::ptr_eq(
+            &packed.drawables[0].index_buffer,
+            &packed.drawables[3].index_buffer
+        ));
+        for frame in 0..3 {
+            let meshes = scene(frame);
+            packed.update_drawables(&queue, &meshes).unwrap();
+            reference.update_drawables(&queue, &meshes).unwrap();
+            let expected = pixels(&device, &queue, &renderer, &reference, &textures);
+            assert!(expected.chunks_exact(4).any(|pixel| pixel[3] != 0));
+            assert_eq!(
+                pixels(&device, &queue, &renderer, &packed, &textures),
+                expected,
+                "rendered pixels differ at frame {frame}"
+            );
+        }
+    }
 }

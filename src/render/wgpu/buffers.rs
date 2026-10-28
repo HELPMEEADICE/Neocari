@@ -742,7 +742,7 @@ mod packed_tests {
                 let shift = frame as f32 * 0.07;
                 let x = -0.8 + i as f32 * 0.35 + shift;
                 Moc3DrawableMesh::from_parts(
-                    (i % 2) as i32,
+                    i % 2,
                     0,
                     if i == 1 || (i == 3 && frame == 0) {
                         0.0
@@ -911,7 +911,7 @@ mod packed_tests {
             packed.update_drawables(&queue, &meshes).unwrap();
             reference.update_drawables(&queue, &meshes).unwrap();
             let expected = pixels(&device, &queue, &renderer, &reference, &textures);
-            assert!(expected.chunks_exact(4).any(|pixel| pixel[3] != 0));
+            assert!(expected.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0));
             assert_eq!(
                 pixels(&device, &queue, &renderer, &packed, &textures),
                 expected,

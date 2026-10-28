@@ -911,7 +911,13 @@ mod packed_tests {
             packed.update_drawables(&queue, &meshes).unwrap();
             reference.update_drawables(&queue, &meshes).unwrap();
             let expected = pixels(&device, &queue, &renderer, &reference, &textures);
-            assert!(expected.as_chunks::<4>().0.iter().any(|pixel| pixel[3] != 0));
+            assert!(
+                expected
+                    .as_chunks::<4>()
+                    .0
+                    .iter()
+                    .any(|pixel| pixel[3] != 0)
+            );
             assert_eq!(
                 pixels(&device, &queue, &renderer, &packed, &textures),
                 expected,

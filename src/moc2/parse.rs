@@ -663,7 +663,7 @@ struct Reader<'a> {
     bit_offset: u8,
     current_byte: u8,
     version: u8,
-    objects: Vec<Ref>,
+    objects: Vec<Option<Ref>>,
 }
 
 impl<'a> Reader<'a> {
@@ -820,20 +820,22 @@ impl<'a> Reader<'a> {
     fn read_object(&mut self) -> Result<Option<Ref>, Moc2Error> {
         self.align();
         let kind = self.read_number()?;
-        if kind == 0 {
-            return Ok(None);
-        }
         if kind == 33 {
             let index = self.read_i32()?;
             return usize::try_from(index)
                 .ok()
                 .and_then(|index| self.objects.get(index))
                 .cloned()
-                .map(Some)
                 .ok_or(Moc2Error::InvalidReference(index));
         }
         if self.objects.len() >= MAX_OBJECTS {
             return Err(Moc2Error::InvalidData("object count exceeds parser limits"));
+        }
+        if kind == 0 {
+            // Cubism 2 numbers every non-reference object, including null.
+            // Dropping this slot shifts later references onto unrelated IDs.
+            self.objects.push(None);
+            return Ok(None);
         }
         let object = match kind {
             1 | 50 | 51 | 60 | 134 => Object::Text(self.read_string()?),
@@ -874,7 +876,7 @@ impl<'a> Reader<'a> {
             _ => return Err(Moc2Error::UnsupportedObjectType(kind)),
         };
         let object = Arc::new(object);
-        self.objects.push(Arc::clone(&object));
+        self.objects.push(Some(Arc::clone(&object)));
         Ok(Some(object))
     }
     fn read_model(&mut self) -> Result<Object, Moc2Error> {
@@ -1072,5 +1074,58 @@ impl<'a> Reader<'a> {
             maximum,
             default,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn null_objects_preserve_deformer_reference_indices() {
+        // A null still occupies slot 1. The parent ID is slot 2, and the
+        // following ID must not be mistaken for it (Mashiro school_summer-2023).
+        let mut bytes = Vec::new();
+        for id in [
+            Some("B_ARM_R_c.01"),
+            None,
+            Some("B_ARM_R_c.02"),
+            Some("B_ARM_R.18"),
+        ] {
+            match id {
+                Some(id) => {
+                    bytes.extend_from_slice(&[50, id.len() as u8]);
+                    bytes.extend_from_slice(id.as_bytes());
+                }
+                None => bytes.push(0),
+            }
+        }
+        bytes.push(33);
+        bytes.extend_from_slice(&2i32.to_be_bytes());
+
+        let mut reader = Reader::new(&bytes);
+        reader.read_object().unwrap();
+        assert!(reader.read_object().unwrap().is_none());
+        let parent = reader.read_object().unwrap().unwrap();
+        reader.read_object().unwrap();
+        let reference = reader.read_object().unwrap().unwrap();
+        assert!(Arc::ptr_eq(&parent, &reference));
+        assert!(matches!(reference.as_ref(), Object::Text(id) if id == "B_ARM_R_c.02"));
+    }
+
+    #[test]
+    fn references_to_null_do_not_allocate_another_slot() {
+        let mut bytes = vec![0, 33];
+        bytes.extend_from_slice(&0i32.to_be_bytes());
+        bytes.extend_from_slice(&[50, 1, b'x', 33]);
+        bytes.extend_from_slice(&1i32.to_be_bytes());
+
+        let mut reader = Reader::new(&bytes);
+        assert!(reader.read_object().unwrap().is_none());
+        assert!(reader.read_object().unwrap().is_none());
+        let id = reader.read_object().unwrap().unwrap();
+        let reference = reader.read_object().unwrap().unwrap();
+        assert!(Arc::ptr_eq(&id, &reference));
+        assert_eq!(reader.objects.len(), 2);
     }
 }

@@ -1,5 +1,24 @@
 # Local renderer changes
 
+## Coalesced animated uploads and late Cubism 2 overrides (2026-10-29)
+
+Animated packed buffers now combine consecutive changed drawables into one queue
+write, reusing the encoding scratch allocation. Unchanged drawables split dirty
+runs, so sparse animation does not upload extra geometry. Empty drawables do not
+introduce gaps. Oversized models retain separate buffers and individual writes.
+`WgpuMeshUpdate::upload_calls` reports the number of vertex queue writes while
+`uploaded_drawables` retains its previous meaning.
+
+`Moc2Runtime::update_with_parameters` runs final overrides after physics and pose
+but before geometry evaluation. Applications can apply lip sync at the same
+point in the animation pipeline without evaluating every deformer and drawable
+twice. `update` preserves its existing behavior through a no-op callback.
+
+Unit tests cover coalesced and sparse writes, unchanged frames, the device-limit
+fallback, and matching parameter/saved-parameter/mesh state against two geometry
+evaluations. The real-GPU packed/unpacked pixel regression additionally exercises
+sparse changes, colors, visibility, draw order, masks and an empty drawable.
+
 ## Cubism 2 null object references (2026-10-28)
 
 The MOC reader now retains a reference-table slot for every null object, matching

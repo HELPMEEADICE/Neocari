@@ -233,6 +233,7 @@ pub struct WgpuMeshBuffers {
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub struct WgpuMeshUpdate {
     uploaded_drawables: usize,
+    upload_calls: usize,
     bounds_changed: bool,
     visibility_changed: bool,
 }
@@ -240,6 +241,11 @@ pub struct WgpuMeshUpdate {
 impl WgpuMeshUpdate {
     pub fn uploaded_drawables(&self) -> usize {
         self.uploaded_drawables
+    }
+
+    /// Number of queue writes used for the changed drawable vertices.
+    pub fn upload_calls(&self) -> usize {
+        self.upload_calls
     }
 
     pub fn bounds_changed(&self) -> bool {
@@ -520,12 +526,15 @@ impl WgpuMeshBuffers {
         }
 
         let mut uploads = 0;
+        let mut upload_calls = 0;
+        let mut upload_start = 0;
         let mut bounds_changed = false;
         let mut visibility_changed = false;
         let mut order_changed = false;
         {
             let (drawables, vertex_upload_bytes) =
                 (&mut self.drawables, &mut self.vertex_upload_bytes);
+            vertex_upload_bytes.clear();
             for (drawable, mesh) in drawables.iter_mut().zip(meshes) {
                 let changes = drawable
                     .vertex_snapshot
@@ -533,13 +542,24 @@ impl WgpuMeshBuffers {
                     .expect("dynamic drawable has a vertex snapshot")
                     .changes(mesh);
                 if changes.vertex_data_changed {
-                    encode_vertices_from_drawable(mesh, vertex_upload_bytes);
-                    if !vertex_upload_bytes.is_empty() {
-                        queue.write_buffer(
-                            drawable.vertex_buffer.as_ref(),
-                            drawable.vertex_range.start,
-                            vertex_upload_bytes,
-                        );
+                    if !mesh.vertices().is_empty() {
+                        if self.packed_vertex_buffer.is_some() {
+                            // Adjacent dirty drawables occupy consecutive bytes
+                            // in the shared buffer. Encode them into one reusable
+                            // staging span and issue one queue write for the run.
+                            if vertex_upload_bytes.is_empty() {
+                                upload_start = drawable.vertex_range.start;
+                            }
+                            append_vertices_from_drawable(mesh, vertex_upload_bytes);
+                        } else {
+                            encode_vertices_from_drawable(mesh, vertex_upload_bytes);
+                            queue.write_buffer(
+                                drawable.vertex_buffer.as_ref(),
+                                drawable.vertex_range.start,
+                                vertex_upload_bytes,
+                            );
+                            upload_calls += 1;
+                        }
                         uploads += 1;
                     }
                     drawable
@@ -547,6 +567,15 @@ impl WgpuMeshBuffers {
                         .as_mut()
                         .expect("dynamic drawable has a vertex snapshot")
                         .update(mesh);
+                } else if let Some(buffer) = self.packed_vertex_buffer.as_deref()
+                    && !vertex_upload_bytes.is_empty()
+                    && !mesh.vertices().is_empty()
+                {
+                    // Preserve sparse updates: never encode or upload an
+                    // unchanged drawable just to bridge two dirty spans.
+                    queue.write_buffer(buffer, upload_start, vertex_upload_bytes);
+                    upload_calls += 1;
+                    vertex_upload_bytes.clear();
                 }
                 let was_visible = drawable.is_visible();
                 let old_bounds = drawable.info.bounds();
@@ -559,6 +588,13 @@ impl WgpuMeshBuffers {
                 order_changed |= old_draw_order != drawable.draw_order().to_bits()
                     || old_render_order != drawable.render_order();
             }
+            if let Some(buffer) = self.packed_vertex_buffer.as_deref()
+                && !vertex_upload_bytes.is_empty()
+            {
+                queue.write_buffer(buffer, upload_start, vertex_upload_bytes);
+                upload_calls += 1;
+            }
+            vertex_upload_bytes.clear();
         }
         if order_changed {
             let drawables = &self.drawables;
@@ -573,6 +609,7 @@ impl WgpuMeshBuffers {
 
         Ok(WgpuMeshUpdate {
             uploaded_drawables: uploads,
+            upload_calls,
             bounds_changed,
             visibility_changed,
         })
@@ -774,12 +811,40 @@ mod packed_tests {
         });
         let mut buffers = WgpuMeshBuffers::from_drawables(&device, &scene(0)).unwrap();
         assert!(buffers.packed_buffers().is_none());
+        let update = buffers.update_drawables(&queue, &scene(1)).unwrap();
+        assert_eq!(update.uploaded_drawables(), 4);
+        assert_eq!(update.upload_calls(), 4);
+    }
+
+    #[test]
+    fn packed_uploads_coalesce_dirty_runs_and_skip_unchanged_meshes() {
+        let (device, queue) = wgpu::Device::noop(&Default::default());
+        let mut meshes = scene(0);
+        let mut buffers = WgpuMeshBuffers::from_drawables(&device, &meshes).unwrap();
+        let unchanged = buffers.update_drawables(&queue, &meshes).unwrap();
+        assert_eq!(unchanged.uploaded_drawables(), 0);
+        assert_eq!(unchanged.upload_calls(), 0);
+
+        meshes = scene(1);
+        let all = buffers.update_drawables(&queue, &meshes).unwrap();
+        assert_eq!(all.uploaded_drawables(), 4);
+        assert_eq!(all.upload_calls(), 1);
+
+        // Separated dirty ranges must use their actual buffer offsets, without
+        // uploading or corrupting the unchanged drawable between them.
+        meshes[0].set_opacity(0.75);
+        meshes[2].vertices_mut()[0].set_position([0.25, 0.5]);
+        meshes[3].set_multiply_color([0.5, 0.8, 0.7]);
+        let sparse = buffers.update_drawables(&queue, &meshes).unwrap();
+        assert_eq!(sparse.uploaded_drawables(), 3);
+        assert_eq!(sparse.upload_calls(), 2);
+        assert!(sparse.bounds_changed());
         assert_eq!(
             buffers
-                .update_drawables(&queue, &scene(1))
+                .update_drawables(&queue, &meshes)
                 .unwrap()
-                .uploaded_drawables(),
-            4
+                .upload_calls(),
+            0
         );
     }
 
@@ -906,8 +971,23 @@ mod packed_tests {
             &packed.drawables[0].index_buffer,
             &packed.drawables[3].index_buffer
         ));
-        for frame in 0..3 {
-            let meshes = scene(frame);
+        for frame in 0..6 {
+            let mut meshes = scene(frame.min(2));
+            if frame >= 3 {
+                meshes[0].set_opacity(0.6);
+                meshes[2].vertices_mut()[0].set_position([0.25, 0.5]);
+                meshes[3].set_multiply_color([0.5, 0.8, 0.7]);
+                meshes[3].set_screen_color([0.1, 0.3, 0.2]);
+            }
+            if frame == 5 {
+                // A zero-vertex drawable has no buffer gap and must not break
+                // the offsets of a dirty span on either side.
+                meshes[1] = Moc3DrawableMesh::from_parts(1, 0, 0.0, 1.0, vec![], vec![], vec![]);
+                packed = WgpuMeshBuffers::from_drawables(&device, &meshes).unwrap();
+                reference = unpacked(&device, &meshes);
+                meshes[0].set_opacity(0.9);
+                meshes[2].set_opacity(0.9);
+            }
             packed.update_drawables(&queue, &meshes).unwrap();
             reference.update_drawables(&queue, &meshes).unwrap();
             let expected = pixels(&device, &queue, &renderer, &reference, &textures);

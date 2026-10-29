@@ -419,6 +419,17 @@ impl Moc2Runtime {
     /// state, apply motions, fall back to automatic blinking, apply expressions
     /// and drag/breath offsets, run physics, then fade pose groups.
     pub fn update(&mut self, delta_seconds: f32) -> Option<()> {
+        self.update_with_parameters(delta_seconds, |_| {})
+    }
+
+    /// Advances animation, applies final parameter overrides, then evaluates
+    /// geometry once. The callback runs after physics and pose, allowing lip
+    /// sync to override motions without requiring a second mesh evaluation.
+    pub fn update_with_parameters(
+        &mut self,
+        delta_seconds: f32,
+        apply_parameters: impl FnOnce(&mut Self),
+    ) -> Option<()> {
         let delta_seconds = delta_seconds.max(0.0);
         self.time += delta_seconds;
         let now = self.time;
@@ -458,6 +469,7 @@ impl Moc2Runtime {
             self.pose = Some(pose);
         }
 
+        apply_parameters(self);
         self.update_meshes()
     }
 
@@ -819,6 +831,37 @@ mod tests {
         runtime.update_meshes().unwrap();
         assert_eq!(runtime.meshes()[0].vertices()[0].position(), [10.0, 0.0]);
         assert_eq!(runtime.meshes()[0].vertices()[2].position(), [10.0, 1.0]);
+    }
+
+    #[test]
+    fn late_parameter_overrides_match_two_mesh_evaluations() {
+        let mut single = runtime();
+        let mut reference = runtime();
+        let motion = Arc::new(Moc2Motion::from_text("$fps=30\nParamX=0,0.2,0.4,0.6\n").unwrap());
+        for runtime in [&mut single, &mut reference] {
+            runtime.start_motion(Arc::clone(&motion), 0.0, 0.0);
+        }
+        for frame in 0..120 {
+            let value = (frame as f32 * 0.1).sin().max(0.0);
+            reference.update(1.0 / 60.0).unwrap();
+            if value > 0.0 {
+                reference.set_parameter("ParamX", value);
+                reference.update_meshes().unwrap();
+            }
+            single
+                .update_with_parameters(1.0 / 60.0, |runtime| {
+                    if value > 0.0 {
+                        runtime.set_parameter("ParamX", value);
+                    }
+                })
+                .unwrap();
+            assert_eq!(single.meshes(), reference.meshes(), "frame {frame}");
+            assert_eq!(single.parameter_values, reference.parameter_values);
+            assert_eq!(
+                single.saved_parameter_values,
+                reference.saved_parameter_values
+            );
+        }
     }
 
     #[test]

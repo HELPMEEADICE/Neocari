@@ -172,7 +172,7 @@ fn build_moc3_drawable_mesh_for_pose(
     art_mesh_index: usize,
 ) -> Option<Moc3DrawableMesh> {
     let keyform_count = art_mesh_keyforms.art_mesh_keyforms(art_mesh_index)?.len();
-    let slots = bindings.keyform_slots(
+    let mut slots = bindings.keyform_slots(
         art_meshes.art_mesh_keyform_binding_band_index(art_mesh_index)?,
         keyform_count,
         parameter_values,
@@ -184,8 +184,14 @@ fn build_moc3_drawable_mesh_for_pose(
         art_mesh_index,
         base_local_keyform_index,
     )?;
+    slots.extend(
+        bindings
+            .blend_shapes
+            .mesh_slots(art_mesh_index, parameter_values)?,
+    );
     let parent_deformer_index = art_meshes.art_mesh_parent_deformer_index(art_mesh_index)?;
     let opacity = interpolate_art_mesh_opacity(art_mesh_keyforms, art_mesh_index, &slots)?
+        .clamp(0.0, 1.0)
         * composed.deformer_opacity(parent_deformer_index);
     let draw_order = interpolate_art_mesh_draw_order(art_mesh_keyforms, art_mesh_index, &slots)?;
     let multiply_color =
@@ -242,13 +248,19 @@ fn update_moc3_drawable_mesh_for_pose(
     art_mesh_index: usize,
 ) -> Option<()> {
     let keyform_count = art_mesh_keyforms.art_mesh_keyforms(art_mesh_index)?.len();
-    let slots = bindings.keyform_slots(
+    let mut slots = bindings.keyform_slots(
         art_meshes.art_mesh_keyform_binding_band_index(art_mesh_index)?,
         keyform_count,
         parameter_values,
     )?;
+    slots.extend(
+        bindings
+            .blend_shapes
+            .mesh_slots(art_mesh_index, parameter_values)?,
+    );
     let parent_deformer_index = art_meshes.art_mesh_parent_deformer_index(art_mesh_index)?;
     let opacity = interpolate_art_mesh_opacity(art_mesh_keyforms, art_mesh_index, &slots)?
+        .clamp(0.0, 1.0)
         * composed.deformer_opacity(parent_deformer_index);
     let draw_order = interpolate_art_mesh_draw_order(art_mesh_keyforms, art_mesh_index, &slots)?;
     let multiply_color =
@@ -313,10 +325,13 @@ fn interpolate_art_mesh_color(
     slots: &[Moc3KeyformSlot],
     channels: impl Fn(Moc3ArtMeshKeyformInfo) -> [f32; 3],
 ) -> Option<[f32; 3]> {
-    let keyforms = keyforms.art_mesh_keyforms(art_mesh_index)?;
     let mut color = [0.0f32; 3];
     for slot in slots {
-        let value = channels(*keyforms.get(slot.local_index)?);
+        // Cubism 4.2 Blend Shapes have no color deltas.
+        if slot.global_index.is_some() {
+            continue;
+        }
+        let value = channels(keyforms.slot_keyform(art_mesh_index, *slot)?);
         for (acc, channel) in color.iter_mut().zip(value) {
             *acc += channel * slot.weight;
         }
@@ -340,12 +355,12 @@ fn interpolate_art_mesh_positions_into(
     slots: &[Moc3KeyformSlot],
     out: &mut Vec<Vector2>,
 ) -> Option<()> {
-    let first = keyforms.art_mesh_keyform_positions(art_mesh_index, slots.first()?.local_index)?;
+    let first = keyforms.slot_positions(art_mesh_index, *slots.first()?)?;
     out.clear();
     out.resize(first.len().checked_div(2)?, Vector2::default());
 
     for slot in slots {
-        let positions = keyforms.art_mesh_keyform_positions(art_mesh_index, slot.local_index)?;
+        let positions = keyforms.slot_positions(art_mesh_index, *slot)?;
         if positions.len() != first.len() || positions.len() % 2 != 0 {
             return None;
         }
@@ -384,10 +399,9 @@ fn interpolate_art_mesh_scalar(
     slots: &[Moc3KeyformSlot],
     value: impl Fn(Moc3ArtMeshKeyformInfo) -> f32,
 ) -> Option<f32> {
-    let keyforms = keyforms.art_mesh_keyforms(art_mesh_index)?;
     let mut out = 0.0f32;
     for slot in slots {
-        out += value(*keyforms.get(slot.local_index)?) * slot.weight;
+        out += value(keyforms.slot_keyform(art_mesh_index, *slot)?) * slot.weight;
     }
     Some(out)
 }

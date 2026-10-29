@@ -473,13 +473,18 @@ impl Moc3Deformers {
         bindings: &Moc3KeyformBindings,
         parameter_values: &[f32],
     ) -> Option<Vec<Vector2>> {
-        let slots = self.warp_keyform_slots(warp_index, bindings, parameter_values)?;
+        let mut slots = self.warp_keyform_slots(warp_index, bindings, parameter_values)?;
+        slots.extend(
+            bindings
+                .blend_shapes
+                .warp_slots(warp_index, parameter_values)?,
+        );
         let begin = usize::try_from(*self.warp_keyform_begin_indices.get(warp_index)?).ok()?;
         let vertex_count = usize::try_from(*self.warp_vertex_counts.get(warp_index)?).ok()?;
         let mut grid = vec![Vector2::default(); vertex_count];
 
         for slot in slots {
-            let keyform_index = begin.checked_add(slot.local_index)?;
+            let keyform_index = slot.index(begin)?;
             let source = self.warp_grid(warp_index, keyform_index)?;
             if source.len() != grid.len() {
                 return None;
@@ -541,14 +546,19 @@ impl Moc3Deformers {
         bindings: &Moc3KeyformBindings,
         parameter_values: &[f32],
     ) -> Option<f32> {
-        let slots = self.warp_keyform_slots(warp_index, bindings, parameter_values)?;
+        let mut slots = self.warp_keyform_slots(warp_index, bindings, parameter_values)?;
+        slots.extend(
+            bindings
+                .blend_shapes
+                .warp_slots(warp_index, parameter_values)?,
+        );
         let begin = usize::try_from(*self.warp_keyform_begin_indices.get(warp_index)?).ok()?;
         let mut opacity = 0.0f32;
         for slot in slots {
-            let keyform_index = begin.checked_add(slot.local_index)?;
+            let keyform_index = slot.index(begin)?;
             opacity += *self.warp_keyform_opacities.get(keyform_index)? * slot.weight;
         }
-        Some(opacity)
+        Some(opacity.clamp(0.0, 1.0))
     }
 
     fn interpolated_warp_colors(

@@ -21,6 +21,7 @@ const KEY_VALUES_SLOT: usize = 77;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Moc3KeyformBindings {
+    pub(super) blend_shapes: super::blend_shapes::BlendShapes,
     parameter_min_values: Vec<f32>,
     parameter_max_values: Vec<f32>,
     parameter_default_values: Vec<f32>,
@@ -36,7 +37,15 @@ pub struct Moc3KeyformBindings {
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub(super) struct Moc3KeyformSlot {
     pub(super) local_index: usize,
+    pub(super) global_index: Option<usize>,
     pub(super) weight: f32,
+}
+
+impl Moc3KeyformSlot {
+    pub(super) fn index(self, begin: usize) -> Option<usize> {
+        self.global_index
+            .or_else(|| begin.checked_add(self.local_index))
+    }
 }
 
 impl Moc3KeyformBindings {
@@ -63,6 +72,7 @@ impl Moc3KeyformBindings {
         .ok_or_else(|| invalid_moc3("invalid parameter binding begin indices"))?;
 
         Ok(Self {
+            blend_shapes: super::blend_shapes::BlendShapes::parse(bytes)?,
             binding_parameter_indices,
             parameter_min_values: read_f32_section(
                 bytes,
@@ -165,6 +175,7 @@ impl Moc3KeyformBindings {
         if keyform_count == 1 {
             return Some(vec![Moc3KeyformSlot {
                 local_index: 0,
+                global_index: None,
                 weight: 1.0,
             }]);
         }
@@ -172,6 +183,7 @@ impl Moc3KeyformBindings {
         if band_index < 0 {
             return Some(vec![Moc3KeyformSlot {
                 local_index: 0,
+                global_index: None,
                 weight: 1.0,
             }]);
         }
@@ -180,6 +192,7 @@ impl Moc3KeyformBindings {
         if bindings.is_empty() {
             return Some(vec![Moc3KeyformSlot {
                 local_index: 0,
+                global_index: None,
                 weight: 1.0,
             }]);
         }
@@ -212,6 +225,7 @@ impl Moc3KeyformBindings {
             .map(|slot| {
                 (slot.flat_index() < keyform_count).then_some(Moc3KeyformSlot {
                     local_index: slot.flat_index(),
+                    global_index: None,
                     weight: slot.weight(),
                 })
             })

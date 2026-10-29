@@ -448,6 +448,61 @@ fn expression_player_applies_faded_expression_parameters() {
 }
 
 #[test]
+fn serialized_expression_activates_zero_default_parameter_meshes() {
+    let mut numeric_model = load_model_runtime("assets/models/Haru/Haru.model3.json").unwrap();
+    let mut named_model = numeric_model.clone();
+    let source = r#"{
+        "Type": "Live2D Expression", "FadeInTime": 0.5,
+        "Parameters": [
+            {"Id": "ParamEyeLSmile", "Value": 1.0, "Blend": 1},
+            {"Id": "ParamEyeLOpen", "Value": 0.5, "Blend": 2},
+            {"Id": "ParamAngleX", "Value": 10.0, "Blend": 0}
+        ]
+    }"#;
+    let mut numeric = ExpressionPlayer::new(Expression3::from_json_str(source).unwrap());
+    let named_source = source
+        .replace("\"Blend\": 1", "\"Blend\": \"Add\"")
+        .replace("\"Blend\": 2", "\"Blend\": \"Multiply\"")
+        .replace("\"Blend\": 0", "\"Blend\": \"Overwrite\"");
+    let mut named = ExpressionPlayer::new(Expression3::from_json_str(&named_source).unwrap());
+    let smile_index = numeric_model
+        .runtime()
+        .parameter_index("ParamEyeLSmile")
+        .unwrap();
+    assert_close(
+        numeric_model
+            .runtime()
+            .parameter_value_by_index(smile_index)
+            .unwrap(),
+        0.0,
+    );
+    let default_meshes = numeric_model.runtime().meshes().to_vec();
+
+    for _ in 0..3 {
+        numeric.tick(0.25);
+        named.tick(0.25);
+        numeric_model.runtime_mut().reset_parameters();
+        named_model.runtime_mut().reset_parameters();
+        numeric.apply(numeric_model.runtime_mut());
+        named.apply(named_model.runtime_mut());
+        numeric_model.runtime_mut().update_meshes().unwrap();
+        named_model.runtime_mut().update_meshes().unwrap();
+        assert_eq!(
+            numeric_model.runtime().meshes(),
+            named_model.runtime().meshes()
+        );
+    }
+    assert_close(
+        numeric_model
+            .runtime()
+            .parameter_value_by_index(smile_index)
+            .unwrap(),
+        1.0,
+    );
+    assert_ne!(numeric_model.runtime().meshes(), default_meshes);
+}
+
+#[test]
 fn expression_manager_fades_out_previous_expression_when_playing_next() {
     let mut model = load_model_runtime("assets/models/Haru/Haru.model3.json").unwrap();
     let first = Expression3::from_json_str(

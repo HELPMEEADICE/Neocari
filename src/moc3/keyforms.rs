@@ -310,6 +310,28 @@ impl Moc3ArtMeshKeyforms {
         let len = usize::try_from(vertex_count).ok()?.checked_mul(2)?;
         self.position_xys.get(start..start.checked_add(len)?)
     }
+
+    pub(super) fn slot_keyform(
+        &self,
+        mesh_index: usize,
+        slot: super::keyform_bindings::Moc3KeyformSlot,
+    ) -> Option<Moc3ArtMeshKeyformInfo> {
+        let begin = usize::try_from(*self.keyform_begin_indices.get(mesh_index)?).ok()?;
+        self.keyforms.get(slot.index(begin)?).copied()
+    }
+
+    pub(super) fn slot_positions(
+        &self,
+        mesh_index: usize,
+        slot: super::keyform_bindings::Moc3KeyformSlot,
+    ) -> Option<&[f32]> {
+        let keyform = self.slot_keyform(mesh_index, slot)?;
+        let start = usize::try_from(keyform.position_begin_index()).ok()?;
+        let len = usize::try_from(*self.vertex_counts.get(mesh_index)?)
+            .ok()?
+            .checked_mul(2)?;
+        self.position_xys.get(start..start.checked_add(len)?)
+    }
 }
 
 fn color_at(channels: &[Vec<f32>; 3], index: usize, default: [f32; 3]) -> [f32; 3] {

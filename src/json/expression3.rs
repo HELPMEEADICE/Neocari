@@ -177,19 +177,19 @@ where
 {
     use serde::de::Error as _;
 
-    // Cubism writes `Blend` as an integer (`0` add, `1` multiply, `2` overwrite);
-    // some exporters spell the mode out instead. Accept both so a model is not
-    // rejected over the encoding of one enum.
+    // Serialized Unity expressions use CubismParameterBlendMode:
+    // 0 = Override, 1 = Additive, 2 = Multiply. Standard exp3.json uses names.
+    // This differs from the native SDK's expression blend enum ordering.
     let value = Option::<serde_json::Value>::deserialize(deserializer)?;
     match value {
         None | Some(serde_json::Value::Null) => Ok(ExpressionBlend::Add),
         Some(serde_json::Value::String(name)) => Ok(ExpressionBlend::from_raw(Some(&name))),
         Some(serde_json::Value::Number(number)) => match number.as_u64() {
-            Some(0) => Ok(ExpressionBlend::Add),
-            Some(1) => Ok(ExpressionBlend::Multiply),
-            Some(2) => Ok(ExpressionBlend::Overwrite),
+            Some(0) => Ok(ExpressionBlend::Overwrite),
+            Some(1) => Ok(ExpressionBlend::Add),
+            Some(2) => Ok(ExpressionBlend::Multiply),
             _ => Err(D::Error::custom(
-                "expression Blend must be 0 (add), 1 (multiply) or 2 (overwrite)",
+                "expression Blend must be 0 (overwrite), 1 (add) or 2 (multiply)",
             )),
         },
         Some(_) => Err(D::Error::custom(
@@ -212,7 +212,7 @@ mod tests {
     }
 
     #[test]
-    fn integer_blend_codes_follow_the_cubism_enum() {
+    fn integer_blend_codes_follow_the_unity_serialized_enum() {
         let parsed = blends(
             r#"{"Type":"Live2D Expression","Parameters":[
                 {"Id":"A","Value":1.0,"Blend":0},
@@ -224,12 +224,35 @@ mod tests {
         assert_eq!(
             parsed,
             [
+                ExpressionBlend::Overwrite,
                 ExpressionBlend::Add,
                 ExpressionBlend::Multiply,
-                ExpressionBlend::Overwrite,
                 ExpressionBlend::Add,
             ]
         );
+    }
+
+    #[test]
+    fn integer_and_named_blends_apply_identically_during_fades() {
+        for (code, name) in [(0, "Overwrite"), (1, "Add"), (2, "Multiply")] {
+            let numeric = Expression3::from_json_str(&format!(
+                r#"{{"Type":"Live2D Expression","Parameters":[{{"Id":"A","Value":0.25,"Blend":{code}}}]}}"#
+            ))
+            .unwrap();
+            let named = Expression3::from_json_str(&format!(
+                r#"{{"Type":"Live2D Expression","Parameters":[{{"Id":"A","Value":0.25,"Blend":"{name}"}}]}}"#
+            ))
+            .unwrap();
+            for current in [0.0, 0.5, 1.0] {
+                for weight in [0.0, 0.25, 0.5, 1.0] {
+                    assert_eq!(
+                        apply_expression_parameter(current, &numeric.parameters()[0], weight),
+                        apply_expression_parameter(current, &named.parameters()[0], weight),
+                        "Blend {code} ({name}), current {current}, weight {weight}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

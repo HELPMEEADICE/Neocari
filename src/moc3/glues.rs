@@ -204,6 +204,9 @@ impl Moc3Glues {
 
             let mesh_a = usize::try_from(*self.art_mesh_indices_a.get(index)?).ok()?;
             let mesh_b = usize::try_from(*self.art_mesh_indices_b.get(index)?).ok()?;
+            if !meshes.get(mesh_a)?.is_enabled() || !meshes.get(mesh_b)?.is_enabled() {
+                continue;
+            }
             let intensity = self.interpolate_intensity(index, bindings, parameter_values)?;
             let info_begin = usize::try_from(*self.info_begin_indices.get(index)?).ok()?;
             let info_end = info_begin.checked_add(info_count)?;
@@ -223,15 +226,16 @@ impl Moc3Glues {
         parameter_values: &[f32],
     ) -> Option<f32> {
         let keyform_count = usize::try_from(*self.keyform_counts.get(index)?).ok()?;
-        let slots = bindings.keyform_slots(
+        let mut slots = bindings.keyform_slots(
             *self.binding_indices.get(index)?,
             keyform_count,
             parameter_values,
         )?;
         let begin = usize::try_from(*self.keyform_begin_indices.get(index)?).ok()?;
         let mut intensity = 0.0f32;
+        slots.extend(bindings.blend_shapes.glue_slots(index, parameter_values)?);
         for slot in slots {
-            let keyform_index = begin.checked_add(slot.local_index)?;
+            let keyform_index = slot.index(begin)?;
             intensity += *self.keyform_intensities.get(keyform_index)? * slot.weight;
         }
         Some(intensity)

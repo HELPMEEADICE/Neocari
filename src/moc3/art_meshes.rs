@@ -93,6 +93,7 @@ impl Moc3ArtMeshInfo {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Moc3ArtMeshes {
+    enabled: Vec<bool>,
     meshes: Vec<Moc3ArtMeshInfo>,
     keyform_binding_band_indices: Vec<i32>,
     parent_deformer_indices: Vec<i32>,
@@ -169,6 +170,7 @@ impl Moc3ArtMeshes {
         }
 
         Ok(Self {
+            enabled: vec![true; meshes.len()],
             meshes,
             keyform_binding_band_indices,
             parent_deformer_indices,
@@ -288,7 +290,7 @@ impl Moc3ArtMeshes {
             ));
         }
 
-        Self::from_parts_with_hierarchy_and_render_orders(
+        let mut parsed = Self::from_parts_with_hierarchy_and_render_orders(
             meshes,
             keyform_binding_band_indices,
             parent_deformer_indices,
@@ -296,11 +298,27 @@ impl Moc3ArtMeshes {
             uv_xys,
             position_indices,
             drawable_masks,
-        )
+        )?;
+        parsed.enabled = read_i32_section_or_default(
+            bytes,
+            &offsets,
+            38,
+            art_mesh_count,
+            header.endianness(),
+            1,
+        )?
+        .into_iter()
+        .map(|flag| flag != 0)
+        .collect();
+        Ok(parsed)
     }
 
     pub fn meshes(&self) -> &[Moc3ArtMeshInfo] {
         &self.meshes
+    }
+
+    pub(super) fn art_mesh_is_enabled(&self, index: usize) -> Option<bool> {
+        self.enabled.get(index).copied()
     }
 
     pub fn keyform_binding_band_indices(&self) -> &[i32] {

@@ -80,6 +80,7 @@ impl Moc3ArtMeshKeyformInfo {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Moc3ArtMeshKeyforms {
+    blend_shape_colors: bool,
     keyform_begin_indices: Vec<i32>,
     keyform_counts: Vec<i32>,
     vertex_counts: Vec<i32>,
@@ -115,6 +116,7 @@ impl Moc3ArtMeshKeyforms {
         }
 
         Ok(Self {
+            blend_shape_colors: false,
             keyform_begin_indices,
             keyform_counts,
             vertex_counts,
@@ -268,17 +270,53 @@ impl Moc3ArtMeshKeyforms {
             }
         }
 
-        Self::from_parts(
+        let mut parsed = Self::from_parts(
             keyform_begin_indices,
             keyform_counts,
             vertex_counts,
             keyforms,
             position_xys,
-        )
+        )?;
+        if matches!(
+            header.version(),
+            super::Moc3Version::V5_0_0 | super::Moc3Version::V5_3_0
+        ) && offsets
+            .section_offset(141)
+            .is_some_and(|offset| offset != 0)
+        {
+            let multiply_indices = read_i32_section(
+                bytes,
+                &offsets,
+                141,
+                art_mesh_keyform_count,
+                header.endianness(),
+            )?;
+            let screen_indices = read_i32_section(
+                bytes,
+                &offsets,
+                142,
+                art_mesh_keyform_count,
+                header.endianness(),
+            )?;
+            for (i, keyform) in parsed.keyforms.iter_mut().enumerate() {
+                let multiply_index = usize::try_from(multiply_indices[i])
+                    .map_err(|_| invalid_moc3("negative keyform multiply color index"))?;
+                let screen_index = usize::try_from(screen_indices[i])
+                    .map_err(|_| invalid_moc3("negative keyform screen color index"))?;
+                keyform.multiply_color = color_at(&multiply_colors, multiply_index, [0.0; 3]);
+                keyform.screen_color = color_at(&screen_colors, screen_index, [0.0; 3]);
+            }
+            parsed.blend_shape_colors = true;
+        }
+        Ok(parsed)
     }
 
     pub fn keyforms(&self) -> &[Moc3ArtMeshKeyformInfo] {
         &self.keyforms
+    }
+
+    pub(super) fn has_blend_shape_colors(&self) -> bool {
+        self.blend_shape_colors
     }
 
     pub fn position_xys(&self) -> &[f32] {

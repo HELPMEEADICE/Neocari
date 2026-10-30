@@ -1,8 +1,8 @@
-use crate::{Result, core::compute_keyform_axis_interval};
+use crate::Result;
 
 use super::{
     Moc3Header, Moc3SectionOffsets, Moc3Version,
-    keyform_bindings::Moc3KeyformSlot,
+    keyform_bindings::{Moc3KeyformSlot, keyform_value_is_in_range, moc3_keyform_axis_interval},
     parse::{invalid_moc3, read_f32_section, read_i32_section, read_u32},
 };
 
@@ -35,6 +35,9 @@ pub(super) struct BlendShapes {
     forms: Vec<FormMap>,
     warps: Vec<Vec<usize>>,
     meshes: Vec<Vec<usize>>,
+    rotations: Vec<Vec<usize>>,
+    parts: Vec<Vec<usize>>,
+    glues: Vec<Vec<usize>>,
     limits: Vec<WeightLimit>,
 }
 
@@ -183,6 +186,11 @@ impl BlendShapes {
             let owners = ints(slot, group_count)?;
             let begins = ints(slot + 1, group_count)?;
             let counts = ints(slot + 2, group_count)?;
+            if owner_count > bytes.len() / 4 {
+                return Err(invalid_moc3(
+                    "Blend Shape target count exceeds the file size",
+                ));
+            }
             let mut groups = vec![Vec::new(); owner_count];
             for i in 0..group_count {
                 let owner = to_usize(owners[i], "Blend Shape target")?;
@@ -197,11 +205,24 @@ impl BlendShapes {
             }
             Ok(groups)
         };
+        let (parts, rotations, glues) =
+            if matches!(header.version(), Moc3Version::V5_0_0 | Moc3Version::V5_3_0) {
+                (
+                    groups(143, count(32), count(0))?,
+                    groups(146, count(33), count(3))?,
+                    groups(149, count(34), count(20))?,
+                )
+            } else {
+                (Vec::new(), Vec::new(), Vec::new())
+            };
         Ok(Self {
             parameters,
             forms,
             warps: groups(125, count(27), count(2))?,
             meshes: groups(128, count(28), count(4))?,
+            rotations,
+            parts,
+            glues,
             limits,
         })
     }
@@ -223,13 +244,78 @@ impl BlendShapes {
         )
     }
 
+    pub(super) fn rotation_slots(
+        &self,
+        index: usize,
+        values: &[f32],
+    ) -> Option<Vec<Moc3KeyformSlot>> {
+        self.slots(
+            self.rotations
+                .get(index)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            values,
+        )
+    }
+
+    pub(super) fn part_slots(&self, index: usize, values: &[f32]) -> Option<Vec<Moc3KeyformSlot>> {
+        self.slots(
+            self.parts.get(index).map(Vec::as_slice).unwrap_or_default(),
+            values,
+        )
+    }
+
+    pub(super) fn glue_slots(&self, index: usize, values: &[f32]) -> Option<Vec<Moc3KeyformSlot>> {
+        self.slots(
+            self.glues.get(index).map(Vec::as_slice).unwrap_or_default(),
+            values,
+        )
+    }
+
+    pub(super) fn mesh_is_in_range(&self, index: usize, values: &[f32]) -> Option<bool> {
+        self.in_range(
+            self.meshes
+                .get(index)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            values,
+        )
+    }
+
+    pub(super) fn warp_is_in_range(&self, index: usize, values: &[f32]) -> Option<bool> {
+        self.in_range(
+            self.warps.get(index).map(Vec::as_slice).unwrap_or_default(),
+            values,
+        )
+    }
+
+    pub(super) fn rotation_is_in_range(&self, index: usize, values: &[f32]) -> Option<bool> {
+        self.in_range(
+            self.rotations
+                .get(index)
+                .map(Vec::as_slice)
+                .unwrap_or_default(),
+            values,
+        )
+    }
+
+    fn in_range(&self, forms: &[usize], values: &[f32]) -> Option<bool> {
+        for &index in forms {
+            let parameter = self.parameters.get(self.forms.get(index)?.parameter_map)?;
+            if !keyform_value_is_in_range(&parameter.keys, *values.get(parameter.parameter)?) {
+                return Some(false);
+            }
+        }
+        Some(true)
+    }
+
     fn slots(&self, forms: &[usize], values: &[f32]) -> Option<Vec<Moc3KeyformSlot>> {
         let mut slots = Vec::new();
         for &index in forms {
             let form = self.forms.get(index)?;
             let parameter = self.parameters.get(form.parameter_map)?;
             let interval =
-                compute_keyform_axis_interval(&parameter.keys, *values.get(parameter.parameter)?)?;
+                moc3_keyform_axis_interval(&parameter.keys, *values.get(parameter.parameter)?)?;
             let mut limit = 1.0f32;
             for &index in &form.limits {
                 let source = self.limits.get(index)?;
@@ -304,11 +390,11 @@ mod tests {
     }
 
     fn fixture() -> Vec<u8> {
-        let mut bytes = vec![0; 0x380];
+        let mut bytes = vec![0; 0x3a0];
         bytes[..4].copy_from_slice(b"MOC3");
         bytes[4] = 4;
         write_word(&mut bytes, 0x40, 0x2c0);
-        write_word(&mut bytes, 0x44, 0x340);
+        write_word(&mut bytes, 0x44, 0x360);
         for (index, value) in [
             (2, 1),
             (4, 1),
@@ -460,6 +546,17 @@ mod tests {
         assert_eq!(active[0].vertices()[0].position(), [0.1, -0.2]);
         assert_eq!(active[0].multiply_color(), [1.0, 1.0, 1.0]);
         assert_eq!(active[0].vertices()[0].uv(), neutral[0].vertices()[0].uv());
+        let outside = build_moc3_drawable_meshes_with_parameters(
+            &meshes,
+            &keyforms,
+            &deformers,
+            &bindings,
+            &[2.0, 0.0],
+        )
+        .unwrap();
+        assert!(!outside[0].is_enabled());
+        assert_eq!(outside[0].opacity(), 1.0);
+        assert!(!crate::render::common::DrawableInfo::from_mesh(&outside[0]).is_visible());
         let negative = build_moc3_drawable_meshes_with_parameters(
             &meshes,
             &keyforms,
@@ -496,7 +593,7 @@ mod tests {
             section(&mut bytes, slot, &values);
         }
         let positions = [
-            0.0f32, 0.0, 1.0, 0.0, 0.0, 1.0, 1.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
+            0.0f32, 0.0, 1.0, 0.0, 0.0, 1.0, 2.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0,
             0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.2, 0.4, 0.2, 0.4, 0.2, 0.4, 0.2, 0.4,
         ]
         .map(|v| v.to_bits() as i32);
@@ -509,5 +606,259 @@ mod tests {
         composed.transform_vertices(0, &mut vertices).unwrap();
         assert!((vertices[0].x() - 0.35).abs() < 0.00001);
         assert!((vertices[0].y() - 0.45).abs() < 0.00001);
+        section(&mut bytes, 101, &[1]);
+        let bilinear = Moc3Deformers::parse(&bytes)
+            .unwrap()
+            .compose(&bindings, &[0.5, 0.0])
+            .unwrap();
+        let mut vertices = vec![crate::core::Vector2::new(0.25, 0.25)];
+        bilinear.transform_vertices(0, &mut vertices).unwrap();
+        assert!((vertices[0].x() - 0.4125).abs() < 0.00001);
+        assert!((vertices[0].y() - 0.45).abs() < 0.00001);
+    }
+
+    fn rotation_fixture() -> Vec<u8> {
+        let mut bytes = fixture();
+        bytes[4] = 5;
+        for (index, value) in [(1, 1), (2, 0), (3, 1), (8, 4), (27, 0), (33, 1)] {
+            count(&mut bytes, index, value);
+        }
+        for (slot, values) in [
+            (16, vec![-1]),
+            (17, vec![1]),
+            (18, vec![0]),
+            (25, vec![-1]),
+            (26, vec![0]),
+            (27, vec![1]),
+            (28, vec![0]),
+            (66, vec![0; 4]),
+            (67, vec![0; 4]),
+            (146, vec![0]),
+            (147, vec![1]),
+            (148, vec![1]),
+        ] {
+            section(&mut bytes, slot, &values);
+        }
+        for (slot, values) in [
+            (61, vec![0.25f32, 0.0, 0.0, 0.5]),
+            (62, vec![10.0, -10.0, 0.0, 30.0]),
+            (63, vec![0.0, 0.0, 0.0, 0.2]),
+            (64, vec![0.0, 0.0, 0.0, 0.4]),
+            (65, vec![1.0, 0.0, 0.0, 1.0]),
+        ] {
+            section(
+                &mut bytes,
+                slot,
+                &values
+                    .into_iter()
+                    .map(|v| v.to_bits() as i32)
+                    .collect::<Vec<_>>(),
+            );
+        }
+        bytes
+    }
+
+    #[test]
+    fn rotation_blend_shapes_add_angle_position_scale_and_opacity() {
+        let bytes = rotation_fixture();
+        let bindings = Moc3KeyformBindings::parse(&bytes).unwrap();
+        let composed = Moc3Deformers::parse(&bytes)
+            .unwrap()
+            .compose(&bindings, &[0.5, 0.0])
+            .unwrap();
+        assert_eq!(composed.deformer_opacity(0), 0.5);
+        let mut vertices = vec![crate::core::Vector2::new(1.0, 0.0)];
+        composed.transform_vertices(0, &mut vertices).unwrap();
+        assert!((vertices[0].x() - (0.1 + 1.5 * 25.0f32.to_radians().cos())).abs() < 0.00001);
+        assert!((vertices[0].y() - (0.2 + 1.5 * 25.0f32.to_radians().sin())).abs() < 0.00001);
+        let outside = Moc3Deformers::parse(&bytes)
+            .unwrap()
+            .compose(&bindings, &[2.0, 0.0])
+            .unwrap();
+        assert!(!outside.deformer_is_enabled(0));
+    }
+
+    #[test]
+    fn cubism5_colors_follow_global_keyform_indices_including_deltas() {
+        let mut bytes = rotation_fixture();
+        for (index, value) in [(9, 4), (10, 24), (23, 3), (24, 3)] {
+            count(&mut bytes, index, value);
+        }
+        for (slot, values) in [
+            (35, vec![0]),
+            (36, vec![1]),
+            (43, vec![3]),
+            (70, vec![0, 6, 12, 18]),
+            (139, vec![1, 0, 0, 2]),
+            (140, vec![0, 0, 0, 2]),
+            (141, vec![1, 0, 0, 2]),
+            (142, vec![0, 0, 0, 2]),
+        ] {
+            section(&mut bytes, slot, &values);
+        }
+        for (slot, values) in [
+            (68, vec![0.5f32, 0.0, 0.0, 0.0]),
+            (69, vec![10.0, 0.0, 0.0, 0.0]),
+            (71, vec![0.0; 24]),
+            (108, vec![0.0, 0.8, -0.4]),
+            (109, vec![0.0, 0.6, -0.2]),
+            (110, vec![0.0, 0.4, -0.1]),
+            (111, vec![0.0, 0.0, 0.2]),
+            (112, vec![0.0, 0.0, 0.3]),
+            (113, vec![0.0, 0.0, 0.4]),
+        ] {
+            section(
+                &mut bytes,
+                slot,
+                &values
+                    .into_iter()
+                    .map(|v| v.to_bits() as i32)
+                    .collect::<Vec<_>>(),
+            );
+        }
+        let bindings = Moc3KeyformBindings::parse(&bytes).unwrap();
+        let deformers = Moc3Deformers::parse(&bytes).unwrap();
+        let keyforms = Moc3ArtMeshKeyforms::parse(&bytes).unwrap();
+        let art_meshes = Moc3ArtMeshes::from_parts(
+            vec![Moc3ArtMeshInfo::new(0, 0, 3, 0, 0, 3, 0, 0)],
+            vec![0.0; 6],
+            vec![0, 1, 2],
+            vec![],
+        )
+        .unwrap();
+        let meshes = build_moc3_drawable_meshes_with_parameters(
+            &art_meshes,
+            &keyforms,
+            &deformers,
+            &bindings,
+            &[0.5, 0.0],
+        )
+        .unwrap();
+        let composed = deformers.compose(&bindings, &[0.5, 0.0]).unwrap();
+        for (multiply, screen) in [
+            (meshes[0].multiply_color(), meshes[0].screen_color()),
+            composed.deformer_colors(0),
+        ] {
+            for (actual, expected) in multiply.into_iter().zip([0.6, 0.5, 0.35]) {
+                assert!((actual - expected).abs() < 0.00001);
+            }
+            for (actual, expected) in screen.into_iter().zip([0.1, 0.15, 0.2]) {
+                assert!((actual - expected).abs() < 0.00001);
+            }
+        }
+    }
+
+    #[test]
+    fn rotation_reflection_uses_the_first_contributing_base_key() {
+        let mut bytes = rotation_fixture();
+        count(&mut bytes, 25, 0);
+        count(&mut bytes, 26, 0);
+        count(&mut bytes, 11, 1);
+        count(&mut bytes, 12, 1);
+        count(&mut bytes, 13, 1);
+        for (slot, values) in [
+            (56, vec![0, 1]),
+            (72, vec![0]),
+            (73, vec![0]),
+            (74, vec![1]),
+            (75, vec![0]),
+            (76, vec![3]),
+            (25, vec![0]),
+            (27, vec![3]),
+            (66, vec![1, 0, 0, 0]),
+        ] {
+            section(&mut bytes, slot, &values);
+        }
+        for slot in [62, 63, 64] {
+            section(&mut bytes, slot, &[0; 4]);
+        }
+        section(&mut bytes, 65, &[1.0f32.to_bits() as i32; 4]);
+        let bindings = Moc3KeyformBindings::parse(&bytes).unwrap();
+        let deformers = Moc3Deformers::parse(&bytes).unwrap();
+        for (value, x) in [(-0.5, -1.0), (0.0, 1.0)] {
+            let composed = deformers.compose(&bindings, &[value, 0.0]).unwrap();
+            let mut vertices = vec![crate::core::Vector2::new(1.0, 0.0)];
+            composed.transform_vertices(0, &mut vertices).unwrap();
+            assert_eq!(vertices[0].x(), x);
+        }
+    }
+
+    #[test]
+    fn part_and_glue_blend_shapes_use_their_own_global_form_arrays() {
+        use crate::moc3::{Moc3DrawableMesh, Moc3DrawableVertex, Moc3Glues, Moc3Parts};
+        let mut bytes = rotation_fixture();
+        for (index, value) in [(0, 1), (6, 4), (20, 1), (32, 1), (34, 1)] {
+            count(&mut bytes, index, value);
+        }
+        for (slot, values) in [
+            (4, vec![-1]),
+            (5, vec![0]),
+            (6, vec![1]),
+            (9, vec![-1]),
+            (143, vec![0]),
+            (144, vec![1]),
+            (145, vec![1]),
+            (149, vec![0]),
+            (150, vec![1]),
+            (151, vec![1]),
+            (
+                58,
+                vec![10.0f32.to_bits() as i32, 0, 0, 20.0f32.to_bits() as i32],
+            ),
+            (59, vec![1.0f32.to_bits() as i32; 4]),
+        ] {
+            section(&mut bytes, slot, &values);
+        }
+        let bindings = Moc3KeyformBindings::parse(&bytes).unwrap();
+        let parts = Moc3Parts::parse(&bytes).unwrap();
+        assert_eq!(
+            parts.interpolate_draw_order(0, &bindings, &[0.5, 0.0]),
+            Some(20.0)
+        );
+        let glues = Moc3Glues::from_parts(
+            vec![-1],
+            vec![0],
+            vec![1],
+            vec![0],
+            vec![1],
+            vec![0],
+            vec![2],
+            vec![0.5, 0.5],
+            vec![0, 0],
+            vec![0.0, 0.0, 0.0, 1.0],
+        )
+        .unwrap();
+        let mut meshes: Vec<_> = [0.0, 2.0]
+            .into_iter()
+            .map(|x| {
+                Moc3DrawableMesh::from_parts(
+                    0,
+                    0,
+                    1.0,
+                    0.0,
+                    vec![Moc3DrawableVertex::new([x, 0.0], [0.0; 2])],
+                    vec![0],
+                    vec![],
+                )
+            })
+            .collect();
+        glues.apply(&mut meshes, &bindings, &[0.5, 0.0]).unwrap();
+        assert_eq!(meshes[0].vertices()[0].position(), [0.5, 0.0]);
+        assert_eq!(meshes[1].vertices()[0].position(), [1.5, 0.0]);
+        meshes[0].set_enabled(false);
+        glues.apply(&mut meshes, &bindings, &[0.5, 0.0]).unwrap();
+        assert_eq!(meshes[1].vertices()[0].position(), [1.5, 0.0]);
+        meshes[0] = Moc3DrawableMesh::from_parts(
+            0,
+            0,
+            1.0,
+            0.0,
+            vec![Moc3DrawableVertex::new([10.0, 0.0], [0.0; 2])],
+            vec![],
+            vec![],
+        );
+        assert!(!meshes[0].is_enabled());
+        glues.apply(&mut meshes, &bindings, &[0.5, 0.0]).unwrap();
+        assert_eq!(meshes[1].vertices()[0].position(), [1.5, 0.0]);
     }
 }

@@ -190,6 +190,15 @@ fn build_moc3_drawable_mesh_for_pose(
             .mesh_slots(art_mesh_index, parameter_values)?,
     );
     let parent_deformer_index = art_meshes.art_mesh_parent_deformer_index(art_mesh_index)?;
+    let enabled = mesh.is_enabled()
+        && composed.deformer_is_enabled(parent_deformer_index)
+        && bindings.band_is_in_range(
+            art_meshes.art_mesh_keyform_binding_band_index(art_mesh_index)?,
+            parameter_values,
+        )?
+        && bindings
+            .blend_shapes
+            .mesh_is_in_range(art_mesh_index, parameter_values)?;
     let opacity = interpolate_art_mesh_opacity(art_mesh_keyforms, art_mesh_index, &slots)?
         .clamp(0.0, 1.0)
         * composed.deformer_opacity(parent_deformer_index);
@@ -231,6 +240,7 @@ fn build_moc3_drawable_mesh_for_pose(
         mesh.masks().to_vec(),
     );
     mesh.set_blend_mode(blend_mode);
+    mesh.set_enabled(enabled);
     mesh.set_multiply_color(multiply_color);
     mesh.set_screen_color(screen_color);
     Some(mesh)
@@ -292,6 +302,17 @@ fn update_moc3_drawable_mesh_for_pose(
     }
 
     mesh.set_opacity(opacity);
+    mesh.set_enabled(
+        art_meshes.art_mesh_is_enabled(art_mesh_index)?
+            && composed.deformer_is_enabled(parent_deformer_index)
+            && bindings.band_is_in_range(
+                art_meshes.art_mesh_keyform_binding_band_index(art_mesh_index)?,
+                parameter_values,
+            )?
+            && bindings
+                .blend_shapes
+                .mesh_is_in_range(art_mesh_index, parameter_values)?,
+    );
     mesh.set_draw_order(draw_order);
     mesh.set_render_order(art_meshes.art_mesh_render_order(art_mesh_index)?);
     mesh.set_multiply_color(multiply_color);
@@ -309,9 +330,9 @@ fn combine_multiply_color(local: [f32; 3], parent: [f32; 3]) -> [f32; 3] {
 
 fn combine_screen_color(local: [f32; 3], parent: [f32; 3]) -> [f32; 3] {
     [
-        clamp01(local[0] + parent[0] - local[0] * parent[0]),
-        clamp01(local[1] + parent[1] - local[1] * parent[1]),
-        clamp01(local[2] + parent[2] - local[2] * parent[2]),
+        clamp01(local[0] + parent[0]),
+        clamp01(local[1] + parent[1]),
+        clamp01(local[2] + parent[2]),
     ]
 }
 
@@ -327,8 +348,8 @@ fn interpolate_art_mesh_color(
 ) -> Option<[f32; 3]> {
     let mut color = [0.0f32; 3];
     for slot in slots {
-        // Cubism 4.2 Blend Shapes have no color deltas.
-        if slot.global_index.is_some() {
+        // Cubism 4.2 has no color deltas; 5.0 stores per-keyform color indices.
+        if slot.global_index.is_some() && !keyforms.has_blend_shape_colors() {
             continue;
         }
         let value = channels(keyforms.slot_keyform(art_mesh_index, *slot)?);
@@ -336,7 +357,7 @@ fn interpolate_art_mesh_color(
             *acc += channel * slot.weight;
         }
     }
-    Some(color)
+    Some(color.map(clamp01))
 }
 
 fn interpolate_art_mesh_positions(

@@ -48,6 +48,7 @@ impl Moc3DrawableVertex {
 /// Renderers draw these meshes with the texture, opacity, blend mode, mask
 /// information, and colors carried by the mesh.
 pub struct Moc3DrawableMesh {
+    enabled: bool,
     texture_index: i32,
     drawable_flags: u8,
     blend_mode: Moc3DrawableBlendMode,
@@ -151,6 +152,7 @@ impl Moc3DrawableMesh {
         masks: Vec<i32>,
     ) -> Self {
         Self {
+            enabled: true,
             texture_index,
             drawable_flags,
             blend_mode: Moc3DrawableBlendMode::from_flags(drawable_flags),
@@ -168,6 +170,17 @@ impl Moc3DrawableMesh {
     /// Returns the texture index used by this drawable.
     pub fn texture_index(&self) -> i32 {
         self.texture_index
+    }
+
+    /// Returns whether model visibility and keyform ranges enable this mesh
+    /// and it contains drawable geometry.
+    /// Transparent enabled meshes can still contribute to clipping masks.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled && !self.vertices.is_empty() && !self.indices.is_empty()
+    }
+
+    pub(crate) fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
     }
 
     /// Returns the multiply color applied to this drawable.
@@ -322,6 +335,7 @@ pub fn build_moc3_drawable_mesh(
     drawable.set_blend_mode(Moc3DrawableBlendMode::from_moc3_flags(
         mesh.drawable_flags(),
     ));
+    drawable.set_enabled(art_meshes.art_mesh_is_enabled(art_mesh_index)?);
     Some(drawable)
 }
 

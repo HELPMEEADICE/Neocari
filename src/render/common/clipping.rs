@@ -9,6 +9,7 @@ use crate::moc3::{Moc3DrawableBlendMode, Moc3DrawableMesh, Moc3DrawableVertex};
 /// Build this with [`DrawableInfo::from_mesh`] before sorting draw order or
 /// preparing clipping masks.
 pub struct DrawableInfo {
+    enabled: bool,
     texture_index: i32,
     blend_mode: Moc3DrawableBlendMode,
     opacity: f32,
@@ -27,6 +28,7 @@ impl DrawableInfo {
         let mask_key = sorted_mask_key(&masks);
 
         Self {
+            enabled: mesh.is_enabled(),
             texture_index: mesh.texture_index(),
             blend_mode: mesh.blend_mode(),
             opacity: mesh.opacity(),
@@ -41,6 +43,7 @@ impl DrawableInfo {
 
     #[cfg(feature = "wgpu")]
     pub(crate) fn update_from_mesh(&mut self, mesh: &Moc3DrawableMesh, update_bounds: bool) {
+        self.enabled = mesh.is_enabled();
         self.texture_index = mesh.texture_index();
         self.blend_mode = mesh.blend_mode();
         self.opacity = mesh.opacity();
@@ -71,9 +74,14 @@ impl DrawableInfo {
         self.opacity
     }
 
-    /// Returns whether this drawable has non-zero opacity and valid bounds.
+    /// Returns whether this drawable is enabled with non-zero opacity and valid bounds.
     pub fn is_visible(&self) -> bool {
-        self.opacity > 0.0 && self.bounds.is_some()
+        self.enabled && self.opacity > 0.0 && self.bounds.is_some()
+    }
+
+    /// Returns model visibility independently of opacity, including for masks.
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
     }
 
     /// Returns the raw draw order value.

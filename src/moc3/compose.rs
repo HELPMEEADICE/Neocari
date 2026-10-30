@@ -56,6 +56,40 @@ pub(super) fn parent_rotation_angle(
     ))
 }
 
+pub(super) fn compose_rotation_axes(
+    composed: &[Option<ComposedDeformer>],
+    parent_index: i32,
+    origin_world: Vector2,
+    translation: Vector2,
+    angle: f32,
+    flip_x: bool,
+    flip_y: bool,
+) -> Option<(f32, bool, bool)> {
+    if let Some(ComposedDeformer::Rotation(parent)) = parent_deformer(composed, parent_index) {
+        // A reflected parent reverses the child's rotation direction. Carry
+        // both reflection axes through the hierarchy instead of probing a
+        // single direction, which cannot retain the matrix's handedness.
+        let angle = if parent.flip_x ^ parent.flip_y {
+            -angle
+        } else {
+            angle
+        };
+        Some((
+            parent.angle_degrees + angle,
+            parent.flip_x ^ flip_x,
+            parent.flip_y ^ flip_y,
+        ))
+    } else {
+        Some((
+            angle
+                + parent_rotation_angle(composed, parent_index, origin_world, translation)?
+                    .to_degrees(),
+            flip_x,
+            flip_y,
+        ))
+    }
+}
+
 fn parent_deformer(
     composed: &[Option<ComposedDeformer>],
     parent_index: i32,
@@ -83,6 +117,12 @@ pub(super) enum ComposedDeformer {
 }
 
 impl ComposedDeformer {
+    fn is_enabled(&self) -> bool {
+        match self {
+            Self::Warp(w) => w.enabled,
+            Self::Rotation(r) => r.enabled,
+        }
+    }
     fn scale_accum(&self) -> f32 {
         match self {
             Self::Warp(warp) => warp.scale_accum,
@@ -107,9 +147,11 @@ impl ComposedDeformer {
 
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct ComposedWarp {
+    pub(super) enabled: bool,
     pub(super) grid: Vec<Vector2>,
     pub(super) cols: usize,
     pub(super) rows: usize,
+    pub(super) interpolation: WarpInterpolation,
     pub(super) scale_accum: f32,
     pub(super) opacity_accum: f32,
     pub(super) multiply_color: [f32; 3],
@@ -118,6 +160,7 @@ pub(super) struct ComposedWarp {
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub(super) struct ComposedRotation {
+    pub(super) enabled: bool,
     pub(super) origin: Vector2,
     pub(super) angle_degrees: f32,
     pub(super) scale: f32,
@@ -135,6 +178,12 @@ pub struct ComposedDeformers {
 }
 
 impl ComposedDeformers {
+    pub(super) fn deformer_is_enabled(&self, parent_index: i32) -> bool {
+        usize::try_from(parent_index)
+            .ok()
+            .and_then(|i| self.deformers.get(i))
+            .is_none_or(ComposedDeformer::is_enabled)
+    }
     pub(super) fn new(deformers: Vec<ComposedDeformer>) -> Self {
         Self { deformers }
     }
@@ -190,7 +239,7 @@ pub(super) fn apply_one(deformer: &ComposedDeformer, point: Vector2) -> Option<V
             &warp.grid,
             warp.cols,
             warp.rows,
-            WarpInterpolation::Quad,
+            warp.interpolation,
         ),
         ComposedDeformer::Rotation(rotation) => Some(rotation_deformer_transform_point(
             point,
@@ -238,4 +287,73 @@ pub(super) fn parent_colors(
     parent_deformer(composed, parent_index)
         .map(ComposedDeformer::colors)
         .unwrap_or((DEFAULT_MULTIPLY_COLOR, DEFAULT_SCREEN_COLOR))
+}
+
+pub(super) fn parent_is_enabled(composed: &[Option<ComposedDeformer>], parent_index: i32) -> bool {
+    parent_deformer(composed, parent_index).is_none_or(ComposedDeformer::is_enabled)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn nested_rotation_preserves_parent_reflection_and_child_rotation() {
+        for parent_flips in [(false, false), (true, false), (false, true), (true, true)] {
+            for child_flips in [(false, false), (true, false), (false, true), (true, true)] {
+                let parent = ComposedDeformer::Rotation(ComposedRotation {
+                    enabled: true,
+                    origin: Vector2::new(0.3, -0.4),
+                    angle_degrees: 30.0,
+                    scale: 2.0,
+                    flip_x: parent_flips.0,
+                    flip_y: parent_flips.1,
+                    scale_accum: 2.0,
+                    opacity_accum: 1.0,
+                    multiply_color: [1.0; 3],
+                    screen_color: [0.0; 3],
+                });
+                let translation = Vector2::new(0.2, 0.5);
+                let origin = apply_one(&parent, translation).unwrap();
+                let (angle_degrees, flip_x, flip_y) = compose_rotation_axes(
+                    &[Some(parent.clone())],
+                    0,
+                    origin,
+                    translation,
+                    45.0,
+                    child_flips.0,
+                    child_flips.1,
+                )
+                .unwrap();
+                let child = ComposedDeformer::Rotation(ComposedRotation {
+                    enabled: true,
+                    origin,
+                    angle_degrees,
+                    scale: 1.0,
+                    flip_x,
+                    flip_y,
+                    scale_accum: 1.0,
+                    opacity_accum: 1.0,
+                    multiply_color: [1.0; 3],
+                    screen_color: [0.0; 3],
+                });
+                let point = Vector2::new(0.4, -0.8);
+                let expected = apply_one(
+                    &parent,
+                    rotation_deformer_transform_point(
+                        point,
+                        45.0,
+                        0.5,
+                        translation,
+                        child_flips.0,
+                        child_flips.1,
+                    ),
+                )
+                .unwrap();
+                let actual = apply_one(&child, point).unwrap();
+                assert!((actual.x() - expected.x()).abs() < 0.00001);
+                assert!((actual.y() - expected.y()).abs() < 0.00001);
+            }
+        }
+    }
 }

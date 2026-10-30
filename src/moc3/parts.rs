@@ -140,15 +140,20 @@ impl Moc3Parts {
             return None;
         }
         let begin = usize::try_from(*self.keyform_begin_indices.get(part_index)?).ok()?;
-        let slots = bindings.keyform_slots(
+        let mut slots = bindings.keyform_slots(
             *self.keyform_binding_band_indices.get(part_index)?,
             keyform_count,
             parameter_values,
         )?;
 
         let mut draw_order = 0.0f32;
+        slots.extend(
+            bindings
+                .blend_shapes
+                .part_slots(part_index, parameter_values)?,
+        );
         for slot in slots {
-            let keyform_index = begin.checked_add(slot.local_index)?;
+            let keyform_index = slot.index(begin)?;
             draw_order += *self.keyform_draw_orders.get(keyform_index)? * slot.weight;
         }
         Some(draw_order)

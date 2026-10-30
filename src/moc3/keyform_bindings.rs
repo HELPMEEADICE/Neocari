@@ -49,6 +49,24 @@ impl Moc3KeyformSlot {
 }
 
 impl Moc3KeyformBindings {
+    pub(super) fn band_is_in_range(
+        &self,
+        band_index: i32,
+        parameter_values: &[f32],
+    ) -> Option<bool> {
+        if band_index < 0 || self.band_begin_indices.is_empty() {
+            return Some(true);
+        }
+        for &binding in self.band_keyform_bindings(band_index)? {
+            let binding = usize::try_from(binding).ok()?;
+            let keys = self.binding_keys(binding)?;
+            let parameter = *self.binding_parameter_indices.get(binding)?;
+            if !keyform_value_is_in_range(keys, *parameter_values.get(parameter)?) {
+                return Some(false);
+            }
+        }
+        Some(true)
+    }
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let header = Moc3Header::parse(bytes)?;
         let offsets = Moc3SectionOffsets::parse(bytes)?;
@@ -207,7 +225,7 @@ impl Moc3KeyformBindings {
                 .get(parameter_index)
                 .copied()
                 .unwrap_or(0.0);
-            let interval = compute_keyform_axis_interval(keys, parameter_value)?;
+            let interval = moc3_keyform_axis_interval(keys, parameter_value)?;
             let active_index = interval.left_index() + usize::from(interval.t() != 0.0);
             if active_index >= keys.len() {
                 return None;
@@ -248,6 +266,26 @@ impl Moc3KeyformBindings {
     }
 }
 
+pub(super) fn keyform_value_is_in_range(keys: &[f32], value: f32) -> bool {
+    value.is_finite()
+        && keys
+            .first()
+            .zip(keys.last())
+            .is_some_and(|(&first, &last)| value >= first - 0.001 && value <= last + 0.001)
+}
+
+pub(super) fn moc3_keyform_axis_interval(
+    keys: &[f32],
+    value: f32,
+) -> Option<crate::core::KeyformAxisInterval> {
+    let value = keys
+        .iter()
+        .copied()
+        .find(|key| (value - key).abs() <= 0.001)
+        .unwrap_or(value);
+    compute_keyform_axis_interval(keys, value)
+}
+
 /// Maps each parameter binding to the parameter that drives it.
 ///
 /// `begin_indices` holds, per parameter, the index of its first parameter
@@ -279,6 +317,16 @@ fn expand_binding_parameter_indices(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn moc3_keys_snap_near_pivots_and_distinguish_outside_ranges() {
+        let keys = [-1.0, 0.0, 1.0];
+        let interval = moc3_keyform_axis_interval(&keys, 0.0005).unwrap();
+        assert_eq!(interval.t(), 1.0);
+        assert!(keyform_value_is_in_range(&keys, 1.0005));
+        assert!(!keyform_value_is_in_range(&keys, 1.002));
+        assert!(!keyform_value_is_in_range(&keys, f32::NAN));
+    }
 
     #[test]
     fn expands_each_parameter_binding_range_to_its_parameter() {

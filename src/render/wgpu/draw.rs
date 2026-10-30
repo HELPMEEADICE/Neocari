@@ -207,7 +207,7 @@ impl WgpuLive2dRenderer {
                     .drawables()
                     .get(drawable_index)
                     .ok_or(WgpuRenderError::MissingDrawable { drawable_index })?;
-                if drawable.is_empty() {
+                if drawable.is_empty() || !drawable.info().is_enabled() {
                     continue;
                 }
                 let texture_bind_group = bind_group_for_texture(drawable.texture_index())?;
@@ -304,4 +304,76 @@ fn texture_bind_group_from_textures(
         .get(texture_index_usize)
         .map(WgpuTexture::bind_group)
         .ok_or(WgpuRenderError::MissingTexture { texture_index })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        moc3::{Moc3DrawableMesh, Moc3DrawableVertex},
+        render::wgpu::WgpuClippingPlan,
+    };
+
+    #[test]
+    fn disabled_masks_are_skipped_while_transparent_enabled_masks_are_drawn() {
+        let (device, queue) = wgpu::Device::noop(&wgpu::DeviceDescriptor::default());
+        let renderer = WgpuLive2dRenderer::new(&device, wgpu::TextureFormat::Rgba8Unorm);
+        let textures = vec![
+            renderer
+                .create_rgba8_texture(&device, &queue, 1, 1, &[255; 4])
+                .unwrap(),
+        ];
+        let mesh = |opacity, masks| {
+            Moc3DrawableMesh::from_parts(
+                0,
+                0,
+                opacity,
+                0.0,
+                vec![
+                    Moc3DrawableVertex::new([-0.5, -0.5], [0.0, 0.0]),
+                    Moc3DrawableVertex::new([0.5, -0.5], [1.0, 0.0]),
+                    Moc3DrawableVertex::new([0.0, 0.5], [0.5, 1.0]),
+                ],
+                vec![0, 1, 2],
+                masks,
+            )
+        };
+        let mut meshes = vec![mesh(0.0, vec![]), mesh(1.0, vec![0])];
+        let mut buffers = WgpuMeshBuffers::from_drawables(&device, &meshes).unwrap();
+        let mut plan = WgpuClippingPlan::from_mesh_buffers(&buffers);
+        plan.prepare_single_texture_masks(&buffers).unwrap();
+        let resources = renderer.create_clipping_resources(&device, &plan).unwrap();
+        let target = renderer.create_mask_render_target(&device, 16).unwrap();
+        for (enabled, expected) in [(true, 1), (false, 0), (true, 1)] {
+            meshes[0].set_enabled(enabled);
+            buffers.update_drawables(&queue, &meshes).unwrap();
+            let mut encoder =
+                device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: None,
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: target.view(),
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    timestamp_writes: None,
+                    occlusion_query_set: None,
+                    multiview_mask: None,
+                });
+                assert_eq!(
+                    renderer
+                        .draw_masks_with_textures(&mut pass, &buffers, &resources, &textures)
+                        .unwrap(),
+                    expected
+                );
+            }
+            let _ = encoder.finish();
+        }
+    }
 }

@@ -665,7 +665,10 @@ impl ModelRuntime {
             let mut opacity = self.part_opacities[index];
             let mut parent = self.parts.parent_part_index(index);
             while let Some(parent_index) = parent.and_then(|p| usize::try_from(p).ok()) {
-                opacity *= self.part_opacities[parent_index];
+                // part_opacities may already contain a parent's inherited
+                // opacity. Read its local factors so each ancestor is used once.
+                opacity *=
+                    self.part_drawable_opacity(parent_index) * self.pose_opacities[parent_index];
                 parent = self.parts.parent_part_index(parent_index);
             }
             self.part_opacities[index] = opacity;
@@ -893,6 +896,38 @@ mod tests {
         assets::load_model_runtime,
         moc3::{Moc3ArtMeshInfo, Moc3ArtMeshes, Moc3OffscreenInfo, Moc3Parts},
     };
+
+    #[test]
+    fn ancestor_part_opacity_is_applied_once_regardless_of_storage_order() {
+        for (parents, expected) in [
+            (vec![-1, 0, 1], vec![0.5, 0.3, 0.21]),
+            (vec![-1, 2, 0], vec![0.5, 0.21, 0.35]),
+        ] {
+            let mut model = load_model_runtime("assets/models/Hiyori/Hiyori.model3.json").unwrap();
+            let runtime = model.runtime_mut();
+            runtime.parts = Moc3Parts::from_parts(
+                parents,
+                vec![-1; 3],
+                vec![0; 3],
+                vec![1; 3],
+                vec![1.0; 3],
+                vec![0.0; 3],
+            );
+            runtime.part_opacity_overrides = vec![Some(0.5), Some(0.6), Some(0.7)];
+            runtime.pose_opacities = vec![1.0; 3];
+            runtime.part_opacities = vec![1.0; 3];
+            runtime.update_part_opacities();
+            for (actual, expected) in runtime.part_opacities.iter().zip(expected) {
+                assert!(
+                    (actual - expected).abs() < 0.00001,
+                    "{actual} != {expected}"
+                );
+            }
+            let first = runtime.part_opacities.clone();
+            runtime.update_part_opacities();
+            assert_eq!(runtime.part_opacities, first);
+        }
+    }
 
     #[test]
     fn part_keyform_opacity_does_not_drive_drawable_visibility() {

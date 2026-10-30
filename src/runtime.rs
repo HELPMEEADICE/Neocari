@@ -145,6 +145,60 @@ pub struct ModelRuntime {
 }
 
 impl ModelRuntime {
+    /// Builds the ordered render tree, including Cubism 5.3 offscreen layers.
+    /// Offscreen nodes must be composited as groups rather than flattened.
+    pub fn render_plan(&self) -> Option<crate::moc3::Moc3RenderPlan> {
+        use crate::moc3::{Moc3BlendConfig, Moc3RenderNode, Moc3RenderPlan};
+        let mut offscreens = Vec::with_capacity(self.offscreen.offscreen_count());
+        for index in 0..self.offscreen.offscreen_count() {
+            let part = usize::try_from(self.offscreen.offscreen_owner_part_index(index)?).ok()?;
+            let (begin, slots, enabled) =
+                self.parts
+                    .slots(part, &self.bindings, &self.parameter_values)?;
+            offscreens.push(
+                self.offscreen
+                    .composition
+                    .state(index, part, enabled, begin, &slots)?,
+            );
+        }
+        let nodes = if let Some(groups) = &self.draw_order_groups {
+            groups.render_nodes(
+                &self.drawable_draw_orders,
+                &self.part_draw_orders,
+                &self.part_enable,
+                self.offscreen.part_offscreen_indices(),
+                &mut offscreens,
+            )?
+        } else {
+            let mut indices: Vec<_> = (0..self.meshes.len()).collect();
+            indices.sort_by_key(|&i| {
+                (
+                    draw_order_from_raw(self.meshes[i].draw_order()),
+                    self.meshes[i].render_order(),
+                    i,
+                )
+            });
+            indices.into_iter().map(Moc3RenderNode::Drawable).collect()
+        };
+        let drawable_blends = self
+            .meshes
+            .iter()
+            .enumerate()
+            .map(|(i, mesh)| {
+                self.offscreen
+                    .composition
+                    .drawable_blends
+                    .get(i)
+                    .copied()
+                    .unwrap_or_else(|| Moc3BlendConfig::from_legacy(mesh.blend_mode()))
+            })
+            .collect();
+        Some(Moc3RenderPlan {
+            nodes,
+            offscreens,
+            drawable_blends,
+        })
+    }
     /// Builds a runtime from already parsed model components.
     ///
     /// This constructor is intended for custom loaders and tests. It returns
@@ -783,8 +837,8 @@ impl ModelRuntime {
 
     /// Returns the current drawable meshes in model order.
     ///
-    /// Sort with [`crate::render::common::draw_order_indices`] or use a renderer
-    /// backend before issuing draw calls.
+    /// Use [`Self::render_plan`] to preserve offscreen composition. Flat models
+    /// can also be sorted with [`crate::render::common::draw_order_indices`].
     pub fn meshes(&self) -> &[Moc3DrawableMesh] {
         &self.meshes
     }

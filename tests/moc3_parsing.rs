@@ -276,6 +276,19 @@ mod moc3_offsets {
     }
 
     #[test]
+    fn parses_v53_extended_offsets_and_rejects_header_overlap() {
+        let mut bytes = moc3_with_offsets(0x7c0, 0x840, 0x900);
+        bytes[4] = 6;
+        bytes[0x2c0..0x2c4].copy_from_slice(&0x880u32.to_le_bytes());
+        let offsets = Moc3SectionOffsets::parse(&bytes).unwrap();
+        assert_eq!(offsets.section_offset(160), Some(0x880));
+        assert_eq!(offsets.section_offset(166), Some(0));
+        assert_eq!(offsets.section_offset(167), None);
+        bytes[0x2c0..0x2c4].copy_from_slice(&0x2c0u32.to_le_bytes());
+        assert!(Moc3SectionOffsets::parse(&bytes).is_err());
+    }
+
+    #[test]
     fn accepts_unused_optional_offsets_at_file_end() {
         let mut bytes = moc3_with_offsets(0x7c0, 0x840, 0x900);
         bytes[0x1a4..0x1a8].copy_from_slice(&0x900u32.to_le_bytes());

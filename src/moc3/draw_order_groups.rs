@@ -41,6 +41,93 @@ pub struct Moc3DrawOrderGroups {
 }
 
 impl Moc3DrawOrderGroups {
+    pub(crate) fn render_nodes(
+        &self,
+        drawable_orders: &[i32],
+        part_orders: &[i32],
+        part_enable: &[bool],
+        part_offscreens: &[i32],
+        offscreens: &mut [super::Moc3OffscreenState],
+    ) -> Option<Vec<super::Moc3RenderNode>> {
+        self.collect_nodes(
+            0,
+            0,
+            drawable_orders,
+            part_orders,
+            part_enable,
+            part_offscreens,
+            offscreens,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn collect_nodes(
+        &self,
+        index: usize,
+        depth: usize,
+        drawable_orders: &[i32],
+        part_orders: &[i32],
+        part_enable: &[bool],
+        part_offscreens: &[i32],
+        offscreens: &mut [super::Moc3OffscreenState],
+    ) -> Option<Vec<super::Moc3RenderNode>> {
+        use super::Moc3RenderNode;
+        if depth > self.groups.len() {
+            return None;
+        }
+        let group = self.groups.get(index)?;
+        let members = self
+            .objects
+            .get(group.object_begin..group.object_begin.checked_add(group.object_count)?)?;
+        let mut ordered = Vec::with_capacity(members.len());
+        for (offset, member) in members.iter().enumerate() {
+            let order = self.effective_draw_order(
+                index,
+                member,
+                drawable_orders,
+                part_orders,
+                part_enable,
+            )?;
+            ordered.push((
+                order.clamp(
+                    group.base_draw_order,
+                    group.max_draw_order.max(group.base_draw_order),
+                ),
+                offset,
+            ));
+        }
+        ordered.sort_by_key(|&(order, _)| order);
+        let mut nodes = Vec::new();
+        for (_, offset) in ordered {
+            let object = &members[offset];
+            if object.object_type == OBJECT_TYPE_DRAWABLE {
+                nodes.push(Moc3RenderNode::Drawable(object.object_idx));
+            } else if object.object_type == OBJECT_TYPE_PART {
+                if object.self_group_idx == index {
+                    return None;
+                }
+                let child = self.collect_nodes(
+                    object.self_group_idx,
+                    depth + 1,
+                    drawable_orders,
+                    part_orders,
+                    part_enable,
+                    part_offscreens,
+                    offscreens,
+                )?;
+                if let Some(id) = part_offscreens
+                    .get(object.object_idx)
+                    .and_then(|&v| usize::try_from(v).ok())
+                {
+                    offscreens.get_mut(id)?.nodes = child;
+                    nodes.push(Moc3RenderNode::Offscreen(id));
+                } else {
+                    nodes.extend(child);
+                }
+            }
+        }
+        Some(nodes)
+    }
     pub fn parse(bytes: &[u8]) -> Result<Option<Self>> {
         let header = Moc3Header::parse(bytes)?;
         let offsets = Moc3SectionOffsets::parse(bytes)?;

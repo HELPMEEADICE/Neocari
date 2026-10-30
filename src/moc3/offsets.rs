@@ -10,12 +10,14 @@ const OFFSET_TABLE_END: usize = OFFSET_TABLE_START + OFFSET_COUNT * U32_SIZE;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Moc3SectionOffsets {
     offsets: [u32; OFFSET_COUNT],
+    extended_offsets: Option<[u32; 7]>,
 }
 
 impl Moc3SectionOffsets {
     pub fn parse(bytes: &[u8]) -> Result<Self> {
         let header = Moc3Header::parse(bytes)?;
-        let table_len = OFFSET_COUNT * U32_SIZE;
+        let extended = header.version() == super::Moc3Version::V5_3_0;
+        let table_len = (OFFSET_COUNT + if extended { 7 } else { 0 }) * U32_SIZE;
         if bytes.len() < OFFSET_TABLE_START + table_len {
             return Err(invalid_offsets("section offset table is incomplete"));
         }
@@ -36,7 +38,31 @@ impl Moc3SectionOffsets {
             validate_optional_offset(bytes, offset, index)?;
         }
 
-        Ok(Self { offsets })
+        let extended_offsets = if extended {
+            let mut values = [0; 7];
+            for (index, value) in values.iter_mut().enumerate() {
+                *value = read_u32(
+                    bytes,
+                    OFFSET_TABLE_END + index * U32_SIZE,
+                    header.endianness(),
+                );
+                validate_optional_offset(bytes, *value, OFFSET_COUNT + index)?;
+            }
+            for offset in offsets.iter().chain(&values).copied().filter(|&v| v != 0) {
+                if (offset as usize) < OFFSET_TABLE_START + table_len {
+                    return Err(invalid_offsets(
+                        "section offset points into the extended offset table",
+                    ));
+                }
+            }
+            Some(values)
+        } else {
+            None
+        };
+        Ok(Self {
+            offsets,
+            extended_offsets,
+        })
     }
 
     pub fn count_info_offset(&self) -> u32 {
@@ -52,7 +78,12 @@ impl Moc3SectionOffsets {
     }
 
     pub fn section_offset(&self, index: usize) -> Option<u32> {
-        self.offsets.get(index).copied()
+        self.offsets.get(index).copied().or_else(|| {
+            self.extended_offsets
+                .as_ref()?
+                .get(index.checked_sub(OFFSET_COUNT)?)
+                .copied()
+        })
     }
 }
 

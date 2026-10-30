@@ -20,6 +20,7 @@ Neocari is an unofficial and independent community project. It is not affiliated
 - Parse and render Cubism V2 `.moc` models at their default parameters.
 - Load Cubism V2 model settings JSON and referenced PNG textures.
 - Render Cubism V3/V4/V5 `.moc3` models and use the parameter, motion, expression, and physics runtime.
+- Evaluate MOC3 Blend Shapes, inherited colors, nested rotations, and Cubism 5.3 offscreen groups.
 - Use the built-in `wgpu` renderer or provide a custom backend through `render::common`.
 
 ## Build from source
@@ -104,6 +105,26 @@ Render animation frames (motion, expression, physics, blinking, and breathing):
 cargo run --features wgpu --example render_moc2_animation -- \
     path/to/model.model.json frame.png --motion idle01 --expression smile01 --frames 30
 ```
+
+## Render a MOC3 model with offscreen composition
+
+The `show_model` example uses `ModelRuntime::render_plan()` and
+`WgpuLive2dRenderer::encode_model()` to preserve nested offscreen groups, their
+opacity, colors, masks, and separate color/alpha blend modes. Custom renderers
+must follow that tree: flattening its meshes changes the result for models such
+as Ren. The existing `draw_with_*` methods remain useful for flat drawable lists
+and UI overlays.
+
+After updating mesh buffers and clipping resources, build the current render
+plan and pass it in a `WgpuModelFrame` to `encode_model`, with a
+`WgpuModelTarget` describing the output view, dimensions, and load operation.
+Create `WgpuModelResources` once with `create_model_resources` and reuse it:
+scratch textures are pooled by nesting depth and rebuilt when dimensions change.
+Models with ordinary blend modes and no offscreen groups draw directly to the
+target.
+
+See [alignment validation](docs/ayagami-alignment.md) for the models, regression
+coverage, and reference discrepancies checked during this work.
 
 ## License
 

@@ -1,18 +1,18 @@
 use crate::Result;
 
 use super::{
-    Moc3CountInfo, Moc3Header, Moc3Ids, Moc3SectionOffsets, Moc3Version,
-    parse::{read_i32_section, to_usize},
+    Moc3CountInfo, Moc3Header, Moc3SectionOffsets, Moc3Version,
+    parse::{invalid_moc3, read_i32_section, to_usize},
 };
 
 const PART_PARENT_PART_INDICES_SLOT: usize = 9;
 const DRAWABLE_PARENT_PART_INDICES_SLOT: usize = 39;
-const PART_OFFSCREEN_INDICES_SLOT: usize = 149;
+const PART_OFFSCREEN_INDICES_SLOT: usize = 152;
 const OFFSCREEN_OWNER_PART_INDICES_SLOT: usize = 155;
-const EFFECT_PART_ID: &str = "PartEffect";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Moc3OffscreenInfo {
+    pub(crate) composition: super::compositing::CompositionInfo,
     part_parent_indices: Vec<i32>,
     drawable_parent_part_indices: Vec<i32>,
     part_offscreen_indices: Vec<i32>,
@@ -28,6 +28,7 @@ impl Moc3OffscreenInfo {
         offscreen_owner_part_indices: Vec<i32>,
     ) -> Self {
         Self {
+            composition: Default::default(),
             part_parent_indices,
             drawable_parent_part_indices,
             part_offscreen_indices,
@@ -68,15 +69,13 @@ impl Moc3OffscreenInfo {
         } else {
             vec![-1; part_count]
         };
-        let offscreen_count = match part_offscreen_indices
+        let offscreen_count = to_usize(counts.offscreens(), "offscreen count")?;
+        if part_offscreen_indices
             .iter()
-            .copied()
-            .filter(|index| *index >= 0)
-            .max()
+            .any(|&index| index < -1 || index >= offscreen_count as i32)
         {
-            Some(index) => usize::try_from(index).map_or(0, |index| index + 1),
-            None => 0,
-        };
+            return Err(invalid_moc3("invalid part offscreen reference"));
+        }
         let offscreen_owner_part_indices = if offscreen_count == 0 {
             Vec::new()
         } else {
@@ -88,8 +87,19 @@ impl Moc3OffscreenInfo {
                 endianness,
             )?
         };
+        for (offscreen, &part) in offscreen_owner_part_indices.iter().enumerate() {
+            if usize::try_from(part)
+                .ok()
+                .and_then(|part| part_offscreen_indices.get(part))
+                .copied()
+                != Some(offscreen as i32)
+            {
+                return Err(invalid_moc3("offscreen owner does not reference its group"));
+            }
+        }
 
         Ok(Self {
+            composition: super::compositing::CompositionInfo::parse(bytes)?,
             part_parent_indices,
             drawable_parent_part_indices,
             part_offscreen_indices,
@@ -119,49 +129,5 @@ impl Moc3OffscreenInfo {
         self.drawable_parent_part_indices
             .get(drawable_index)
             .copied()
-    }
-
-    pub(crate) fn effect_source_drawable_indices(&self, ids: &Moc3Ids) -> Vec<usize> {
-        if self.offscreen_count() == 0 {
-            return Vec::new();
-        }
-
-        let Some(effect_part_index) = ids.parts().iter().position(|id| id == EFFECT_PART_ID) else {
-            return Vec::new();
-        };
-
-        self.drawable_parent_part_indices
-            .iter()
-            .copied()
-            .enumerate()
-            .filter_map(|(drawable_index, parent_part_index)| {
-                self.is_part_descendant_of(parent_part_index, effect_part_index)
-                    .then_some(drawable_index)
-            })
-            .collect()
-    }
-
-    fn is_part_descendant_of(&self, part_index: i32, ancestor_index: usize) -> bool {
-        let mut part_index = part_index;
-        let mut guard = 0usize;
-
-        while part_index >= 0 {
-            let Ok(index) = usize::try_from(part_index) else {
-                return false;
-            };
-            if index == ancestor_index {
-                return true;
-            }
-            let Some(parent_index) = self.part_parent_indices.get(index).copied() else {
-                return false;
-            };
-            part_index = parent_index;
-            guard += 1;
-            if guard > self.part_parent_indices.len() {
-                return false;
-            }
-        }
-
-        false
     }
 }

@@ -14,6 +14,7 @@ const PART_KEYFORM_OPACITIES_SLOT: usize = 59;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Moc3Parts {
+    visible: Vec<bool>,
     parent_part_indices: Vec<i32>,
     keyform_binding_band_indices: Vec<i32>,
     keyform_begin_indices: Vec<i32>,
@@ -33,6 +34,7 @@ impl Moc3Parts {
         keyform_opacities: Vec<f32>,
     ) -> Self {
         Self {
+            visible: vec![true; parent_part_indices.len()],
             parent_part_indices,
             keyform_binding_band_indices,
             keyform_begin_indices,
@@ -51,6 +53,12 @@ impl Moc3Parts {
         let part_keyform_count = to_usize(counts.part_keyforms(), "part keyform count")?;
 
         Ok(Self {
+            visible: super::parse::read_i32_section_or_default(
+                bytes, &offsets, 7, part_count, endianness, 1,
+            )?
+            .into_iter()
+            .map(|f| f != 0)
+            .collect(),
             parent_part_indices: read_i32_section(
                 bytes,
                 &offsets,
@@ -98,6 +106,40 @@ impl Moc3Parts {
 
     pub fn part_count(&self) -> usize {
         self.parent_part_indices.len()
+    }
+
+    pub(super) fn is_visible(&self, index: usize) -> bool {
+        let mut current = Some(index);
+        for _ in 0..self.part_count() + 1 {
+            let Some(i) = current else {
+                return true;
+            };
+            if !self.visible.get(i).copied().unwrap_or(false) {
+                return false;
+            }
+            current = self
+                .parent_part_index(i)
+                .and_then(|p| usize::try_from(p).ok());
+        }
+        false
+    }
+
+    pub(crate) fn slots(
+        &self,
+        index: usize,
+        bindings: &Moc3KeyformBindings,
+        values: &[f32],
+    ) -> Option<(usize, Vec<super::keyform_bindings::Moc3KeyformSlot>, bool)> {
+        let band = *self.keyform_binding_band_indices.get(index)?;
+        let count = usize::try_from(*self.keyform_counts.get(index)?).ok()?;
+        let begin = usize::try_from(*self.keyform_begin_indices.get(index)?).ok()?;
+        let mut slots = bindings.keyform_slots(band, count, values)?;
+        slots.extend(bindings.blend_shapes.part_slots(index, values)?);
+        Some((
+            begin,
+            slots,
+            self.is_visible(index) && bindings.band_is_in_range(band, values)?,
+        ))
     }
 
     pub fn parent_part_index(&self, part_index: usize) -> Option<i32> {

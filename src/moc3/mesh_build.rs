@@ -95,8 +95,8 @@ pub fn build_moc3_drawable_meshes_with_parameters_offscreen_and_part_opacities(
     art_mesh_keyforms: &Moc3ArtMeshKeyforms,
     deformers: &Moc3Deformers,
     bindings: &Moc3KeyformBindings,
-    ids: &Moc3Ids,
-    offscreen: &Moc3OffscreenInfo,
+    _ids: &Moc3Ids,
+    _offscreen: &Moc3OffscreenInfo,
     parameter_values: &[f32],
     drawable_part_opacities: &[f32],
 ) -> Option<Vec<Moc3DrawableMesh>> {
@@ -113,10 +113,6 @@ pub fn build_moc3_drawable_meshes_with_parameters_offscreen_and_part_opacities(
         mesh.set_opacity(mesh.opacity() * part_opacity);
     }
 
-    for drawable_index in offscreen.effect_source_drawable_indices(ids) {
-        meshes.get_mut(drawable_index)?.set_opacity(0.0);
-    }
-
     Some(meshes)
 }
 
@@ -128,8 +124,8 @@ pub(crate) fn update_moc3_drawable_meshes_with_parameters_offscreen_and_part_opa
     art_mesh_keyforms: &Moc3ArtMeshKeyforms,
     deformers: &Moc3Deformers,
     bindings: &Moc3KeyformBindings,
-    ids: &Moc3Ids,
-    offscreen: &Moc3OffscreenInfo,
+    _ids: &Moc3Ids,
+    _offscreen: &Moc3OffscreenInfo,
     parameter_values: &[f32],
     drawable_part_opacities: &[f32],
 ) -> Option<()> {
@@ -154,10 +150,6 @@ pub(crate) fn update_moc3_drawable_meshes_with_parameters_offscreen_and_part_opa
     for (drawable_index, part_opacity) in drawable_part_opacities.iter().copied().enumerate() {
         let mesh = meshes.get_mut(drawable_index)?;
         mesh.set_opacity(mesh.opacity() * part_opacity);
-    }
-
-    for drawable_index in offscreen.effect_source_drawable_indices(ids) {
-        meshes.get_mut(drawable_index)?.set_opacity(0.0);
     }
 
     Some(())

@@ -25,6 +25,52 @@ pub enum WgpuRenderError {
 }
 
 impl WgpuLive2dRenderer {
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn draw_model_drawable(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        buffers: &WgpuMeshBuffers,
+        index: usize,
+        textures: &[WgpuTexture],
+        clipping: &WgpuClippingResources,
+        mask: &WgpuMaskRenderTarget,
+        transform: &WgpuTransform,
+        blend: crate::moc3::Moc3DrawableBlendMode,
+    ) -> Result<bool, WgpuRenderError> {
+        let drawable = buffers
+            .drawables()
+            .get(index)
+            .ok_or(WgpuRenderError::MissingDrawable {
+                drawable_index: index,
+            })?;
+        if !drawable.is_visible() {
+            return Ok(false);
+        }
+        let texture = texture_bind_group_from_textures(textures, drawable.texture_index())?;
+        pass.set_bind_group(0, texture, &[]);
+        pass.set_bind_group(1, transform.bind_group(), &[]);
+        if drawable.masks().is_empty() {
+            pass.set_pipeline(self.pipeline_for_blend_mode(blend));
+        } else {
+            let context = clipping.context_for_drawable(index).ok_or(
+                WgpuRenderError::MissingClippingContext {
+                    drawable_index: index,
+                },
+            )?;
+            pass.set_pipeline(self.masked_pipeline_for_blend_mode(blend));
+            pass.set_bind_group(2, mask.bind_group(), &[]);
+            pass.set_bind_group(3, context.clip_params().bind_group(), &[]);
+        }
+        if let Some((vertices, indices)) = buffers.packed_buffers() {
+            pass.set_vertex_buffer(0, vertices.slice(..));
+            pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint16);
+        } else {
+            pass.set_vertex_buffer(0, drawable.vertex_buffer_slice());
+            pass.set_index_buffer(drawable.index_buffer_slice(), wgpu::IndexFormat::Uint16);
+        }
+        pass.draw_indexed(drawable.draw_index_range(), drawable.base_vertex(), 0..1);
+        Ok(true)
+    }
     pub fn draw(
         &self,
         render_pass: &mut wgpu::RenderPass<'_>,

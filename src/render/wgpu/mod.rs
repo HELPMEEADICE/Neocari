@@ -8,6 +8,7 @@
 mod buffers;
 mod clipping;
 mod draw;
+mod model;
 mod pipeline;
 mod texture;
 
@@ -29,6 +30,9 @@ pub use clipping::{
     WgpuClippingPlan, WgpuClippingResources, WgpuMaskRenderTarget, WgpuPreparedClippingContext,
 };
 pub use draw::WgpuRenderError;
+pub use model::{
+    WgpuModelFrame, WgpuModelRenderError, WgpuModelRenderStats, WgpuModelResources, WgpuModelTarget,
+};
 pub use pipeline::{
     live2d_blend_state, live2d_masked_wgsl_source, live2d_wgsl_source, mask_wgsl_source,
     preferred_surface_format, wgpu_mask_blend_state,
@@ -40,6 +44,7 @@ pub use texture::{
 
 #[derive(Debug)]
 pub struct WgpuLive2dRenderer {
+    color_format: wgpu::TextureFormat,
     normal_pipeline: wgpu::RenderPipeline,
     additive_pipeline: wgpu::RenderPipeline,
     multiplicative_pipeline: wgpu::RenderPipeline,

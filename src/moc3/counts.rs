@@ -31,6 +31,9 @@ pub struct Moc3CountInfo {
     glue_keyforms: u32,
     keyform_multiply_colors: u32,
     keyform_screen_colors: u32,
+    offscreens: u32,
+    offscreen_keyforms: u32,
+    offscreen_blend_form_maps: u32,
 }
 
 impl Moc3CountInfo {
@@ -74,11 +77,24 @@ impl Moc3CountInfo {
             glue_keyforms: read(22),
             keyform_multiply_colors: if word_count > 23 { read(23) } else { 0 },
             keyform_screen_colors: if word_count > 24 { read(24) } else { 0 },
+            offscreens: if word_count > 35 { read(35) } else { 0 },
+            offscreen_keyforms: if word_count > 36 { read(36) } else { 0 },
+            offscreen_blend_form_maps: if word_count > 37 { read(37) } else { 0 },
         })
     }
 
     pub fn parts(&self) -> u32 {
         self.parts
+    }
+
+    pub fn offscreens(&self) -> u32 {
+        self.offscreens
+    }
+    pub fn offscreen_keyforms(&self) -> u32 {
+        self.offscreen_keyforms
+    }
+    pub fn offscreen_blend_form_maps(&self) -> u32 {
+        self.offscreen_blend_form_maps
     }
 
     pub fn deformers(&self) -> u32 {

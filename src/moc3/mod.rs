@@ -10,6 +10,7 @@ mod art_meshes;
 mod blend_shapes;
 mod canvas;
 mod compose;
+mod compositing;
 mod counts;
 mod deformers;
 mod draw_order_groups;
@@ -27,6 +28,10 @@ mod parts;
 
 pub use art_meshes::{Moc3ArtMeshInfo, Moc3ArtMeshes};
 pub use canvas::Moc3CanvasInfo;
+pub use compositing::{
+    Moc3AlphaBlendMode, Moc3BlendConfig, Moc3ColorBlendMode, Moc3OffscreenState, Moc3RenderNode,
+    Moc3RenderPlan,
+};
 pub use counts::Moc3CountInfo;
 pub use deformers::Moc3Deformers;
 pub use draw_order_groups::Moc3DrawOrderGroups;

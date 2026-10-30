@@ -299,6 +299,7 @@ impl WgpuLive2dRenderer {
             create_wgpu_transform(device, &transform_bind_group_layout, &Matrix44::identity());
 
         Self {
+            color_format,
             normal_pipeline,
             additive_pipeline,
             multiplicative_pipeline,

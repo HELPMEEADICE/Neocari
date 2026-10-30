@@ -10,7 +10,8 @@ use neocari::{
     motion::load_motion,
     render::wgpu::{
         WgpuClippingPlan, WgpuClippingResources, WgpuLive2dRenderer, WgpuMaskRenderTarget,
-        WgpuMeshBuffers, WgpuTexture, WgpuTransform, preferred_surface_format,
+        WgpuMeshBuffers, WgpuModelFrame, WgpuModelResources, WgpuModelTarget, WgpuTexture,
+        WgpuTransform, preferred_surface_format,
     },
 };
 use winit::{
@@ -311,6 +312,7 @@ struct LoadedModel {
     textures: Vec<WgpuTexture>,
     clipping_resources: WgpuClippingResources,
     mask_target: WgpuMaskRenderTarget,
+    composition: WgpuModelResources,
     transform: WgpuTransform,
     model_bounds: ModelBounds,
 }
@@ -865,31 +867,35 @@ impl WindowState {
                 label: Some("show_model.encoder"),
             });
 
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("show_model.mask_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: self.model.mask_target.view(),
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            self.renderer.draw_masks_with_textures(
-                &mut pass,
-                &self.model.mesh_buffers,
-                &self.model.clipping_resources,
-                &self.model.textures,
-            )?;
-        }
+        let plan = self
+            .model
+            .runtime
+            .render_plan()
+            .ok_or(ExampleError("invalid model render plan"))?;
+        self.renderer.encode_model(
+            &self.device,
+            &mut encoder,
+            &mut self.model.composition,
+            WgpuModelFrame {
+                plan: &plan,
+                meshes: &self.model.mesh_buffers,
+                textures: &self.model.textures,
+                clipping: &self.model.clipping_resources,
+                mask_target: &self.model.mask_target,
+                transform: &self.model.transform,
+            },
+            WgpuModelTarget {
+                view: &view,
+                width: self.config.width,
+                height: self.config.height,
+                load: wgpu::LoadOp::Clear(wgpu::Color {
+                    r: 0.08,
+                    g: 0.09,
+                    b: 0.10,
+                    a: 1.0,
+                }),
+            },
+        )?;
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -899,12 +905,7 @@ impl WindowState {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.08,
-                            g: 0.09,
-                            b: 0.10,
-                            a: 1.0,
-                        }),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -914,14 +915,6 @@ impl WindowState {
                 multiview_mask: None,
             });
 
-            self.renderer.draw_with_textures_clipping_and_transform(
-                &mut pass,
-                &self.model.mesh_buffers,
-                &self.model.textures,
-                &self.model.clipping_resources,
-                &self.model.mask_target,
-                &self.model.transform,
-            )?;
             for button_ui in &self.button_uis {
                 self.renderer.draw_with_textures_and_transform(
                     &mut pass,
@@ -1125,6 +1118,7 @@ fn load_rendered_model(
             ),
         )?,
         mask_target: renderer.create_mask_render_target(device, MASK_TEXTURE_SIZE)?,
+        composition: renderer.create_model_resources(device),
         transform: renderer.create_transform(
             device,
             &fit_model_matrix_with_scale(model_bounds, surface_size, model_scale),

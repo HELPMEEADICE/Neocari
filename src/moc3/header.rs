@@ -68,7 +68,8 @@ impl Moc3Version {
         match self {
             Self::V3_0_0 | Self::V3_3_0 | Self::V4_0_0 => 23,
             Self::V4_2_0 => 32,
-            Self::V5_0_0 | Self::V5_3_0 => 35,
+            Self::V5_0_0 => 35,
+            Self::V5_3_0 => 38,
         }
     }
 }

@@ -35,7 +35,7 @@ pub struct Moc3KeyformBindings {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
-pub(super) struct Moc3KeyformSlot {
+pub(crate) struct Moc3KeyformSlot {
     pub(super) local_index: usize,
     pub(super) global_index: Option<usize>,
     pub(super) weight: f32,

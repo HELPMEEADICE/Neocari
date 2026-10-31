@@ -177,12 +177,10 @@ pub(crate) fn parse_scene(bytes: &[u8]) -> Result<Moc2Scene, Moc2Error> {
     }
 
     let deformers = convert_deformers(&part_deformers, &mut registry)?;
-    let deformer_index: HashMap<String, usize> = deformers
-        .iter()
-        .enumerate()
-        .filter(|(_, deformer)| !deformer.id.is_empty())
-        .map(|(index, deformer)| (deformer.id.clone(), index))
-        .collect();
+    let mut deformer_index: HashMap<String, usize> = HashMap::new();
+    for (index, deformer) in deformers.iter().enumerate() {
+        deformer_index.entry(deformer.id.clone()).or_insert(index);
+    }
 
     let mut drawables = Vec::with_capacity(part_drawables.len());
     let mut clip_ids = Vec::with_capacity(part_drawables.len());
@@ -449,8 +447,12 @@ fn convert_deformers(
         });
     }
 
-    // Cubism 2 evaluates deformers parent-first. Order the parsed deformers so a
-    // single forward pass can resolve every parent.
+    order_deformers(parsed)
+}
+
+/// Cubism 2 evaluates deformers parent-first. Order the parsed deformers so a
+/// single forward pass can resolve every parent.
+fn order_deformers(parsed: Vec<ParsedDeformer>) -> Result<Vec<Moc2Deformer>, Moc2Error> {
     let mut ordered = Vec::with_capacity(parsed.len());
     let mut placed: HashMap<String, usize> = HashMap::new();
     let mut remaining: Vec<Option<ParsedDeformer>> = parsed.into_iter().map(Some).collect();
@@ -477,9 +479,9 @@ fn convert_deformers(
             };
             let deformer = slot.take().expect("checked above");
             let index = ordered.len();
-            if !deformer.id.is_empty() {
-                placed.insert(deformer.id.clone(), index);
-            }
+            // An empty string is a real id: some exported models parent deformers
+            // to an unnamed deformer. Like Cubism 2, the first match wins.
+            placed.entry(deformer.id.clone()).or_insert(index);
             ordered.push(Moc2Deformer {
                 id: deformer.id,
                 target,
@@ -1127,5 +1129,61 @@ mod tests {
         let reference = reader.read_object().unwrap().unwrap();
         assert!(Arc::ptr_eq(&id, &reference));
         assert_eq!(reader.objects.len(), 2);
+    }
+
+    fn parsed_deformer(id: &str, target: Option<&str>) -> ParsedDeformer {
+        ParsedDeformer {
+            id: id.to_owned(),
+            target: target.map(str::to_owned),
+            pivots: Moc2PivotTable::new(Vec::new()).unwrap(),
+            kind: Moc2DeformerKind::Warp {
+                x_cells: 1,
+                y_cells: 1,
+                points: Vec::new(),
+            },
+            opacities: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn empty_deformer_ids_can_be_parents() {
+        // Yukina dream_festival_4_ur: the front hair hangs from an unnamed
+        // deformer under the face, listed after its children.
+        let ordered = order_deformers(vec![
+            parsed_deformer("B_HAIR_FRONT.07", Some("")),
+            parsed_deformer("B_FACE.07", Some(BASE_TARGET)),
+            parsed_deformer("", Some("B_FACE.07")),
+        ])
+        .unwrap();
+        let ids: Vec<_> = ordered
+            .iter()
+            .map(|deformer| deformer.id.as_str())
+            .collect();
+        assert_eq!(ids, ["B_FACE.07", "", "B_HAIR_FRONT.07"]);
+        assert_eq!(ordered[1].target, Some(0));
+        assert_eq!(ordered[2].target, Some(1));
+    }
+
+    #[test]
+    fn duplicate_deformer_ids_resolve_to_the_first() {
+        let ordered = order_deformers(vec![
+            parsed_deformer("A", None),
+            parsed_deformer("A", None),
+            parsed_deformer("child", Some("A")),
+        ])
+        .unwrap();
+        assert_eq!(ordered[2].target, Some(0));
+    }
+
+    #[test]
+    fn unresolvable_parents_are_still_rejected() {
+        assert!(order_deformers(vec![parsed_deformer("child", Some("missing"))]).is_err());
+        assert!(
+            order_deformers(vec![
+                parsed_deformer("a", Some("b")),
+                parsed_deformer("b", Some("a")),
+            ])
+            .is_err()
+        );
     }
 }

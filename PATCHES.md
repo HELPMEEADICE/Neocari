@@ -1,5 +1,32 @@
 # Local renderer changes
 
+## Cubism 2 deformers with an empty ID (2026-10-31)
+
+An empty string is now an ordinary deformer ID, matching `Live2D-v2-Lua`'s
+`ModelContext:init()` and `getDeformerIndex()`, which compare IDs as-is.
+Previously, `convert_deformers` and the drawable lookup skipped empty IDs, so a
+deformer or drawable whose target is `""` never resolved. The whole model then
+failed with `deformer hierarchy is cyclic or references a missing parent`, or
+with `missing drawable deformer` when a drawable hung directly from the unnamed
+deformer. When several deformers share an ID, the first one wins, as in the Lua
+lookup.
+
+72 BanG Dream! costumes contain exactly one unnamed deformer: 70 of Yukina's
+100 costumes, where it sits between `B_FACE.07` (once `B_FACE.13`) and the
+front hair, plus Mashiro's `vocal_limited_ssr` and Tomoe's `live_event_279_ur`.
+Treating `""` as the root instead loads these models but detaches the front
+hair from the face, so it is drawn in the wrong place.
+
+The parent-first ordering moved into `order_deformers()`. Three parser unit
+tests cover an unnamed parent listed after its child, duplicate IDs, and
+missing or cyclic parents, which are still rejected. Loading every costume of
+64 characters (2,954 models, moc2 and moc3) through BandoriPet's archive cache
+went from 2,880 to 2,952 successes with no model newly failing. The remaining
+two failures are unrelated: Yukina's `live_sr_01` targets a nonexistent
+`B_FACE.08`, and Ritsu's `school_winter_hs` reports an invalid blend shape
+weight limit. Yukina's `dream_festival_4_ur` renders with its front hair in the
+same place as the Lua renderer.
+
 ## Coalesced animated uploads and late Cubism 2 overrides (2026-10-29)
 
 Animated packed buffers now combine consecutive changed drawables into one queue

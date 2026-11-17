@@ -1091,15 +1091,21 @@ fn load_rendered_model(
     model_scale: f32,
 ) -> Result<LoadedModel, Box<dyn Error>> {
     let loaded = load_model_runtime(spec.path)?;
-    let runtime = loaded.runtime().clone();
+    let runtime = loaded.runtime();
     let model_bounds = ModelBounds::from_drawables(runtime.meshes())
         .ok_or(ExampleError("model has no drawable bounds"))?;
     let textures = create_textures(renderer, device, queue, loaded.textures())?;
-    let motion_groups = motion_paths_by_group(&runtime, loaded.model_dir());
+    let motion_groups = motion_paths_by_group(runtime, loaded.model_dir());
     let motions = motion_groups.values().flatten().cloned().collect();
-    let expressions = expression_paths(&runtime, loaded.model_dir());
+    let expressions = expression_paths(runtime, loaded.model_dir());
+    let mesh_buffers = WgpuMeshBuffers::from_drawables(device, runtime.meshes())
+        .ok_or(ExampleError("failed to create mesh buffers"))?;
+    let mut clipping_plan = WgpuClippingPlan::from_mesh_buffers(&mesh_buffers);
+    clipping_plan.prepare_single_texture_masks(&mesh_buffers)?;
+    let clipping_resources = renderer.create_clipping_resources(device, &clipping_plan)?;
+    let runtime = loaded.into_runtime();
 
-    let mut model = LoadedModel {
+    let model = LoadedModel {
         runtime,
         motions,
         motion_groups,
@@ -1107,16 +1113,9 @@ fn load_rendered_model(
         player: None,
         expression_manager: ExpressionManager::new(),
         dirty: false,
-        mesh_buffers: WgpuMeshBuffers::from_drawables(device, &[])
-            .ok_or(ExampleError("failed to create mesh buffers"))?,
+        mesh_buffers,
         textures,
-        clipping_resources: renderer.create_clipping_resources(
-            device,
-            &WgpuClippingPlan::from_mesh_buffers(
-                &WgpuMeshBuffers::from_drawables(device, &[])
-                    .ok_or(ExampleError("failed to create mesh buffers"))?,
-            ),
-        )?,
+        clipping_resources,
         mask_target: renderer.create_mask_render_target(device, MASK_TEXTURE_SIZE)?,
         composition: renderer.create_model_resources(device),
         transform: renderer.create_transform(
@@ -1125,7 +1124,6 @@ fn load_rendered_model(
         ),
         model_bounds,
     };
-    rebuild_model_gpu(renderer, device, &mut model)?;
     Ok(model)
 }
 

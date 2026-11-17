@@ -123,6 +123,24 @@ scratch textures are pooled by nesting depth and rebuilt when dimensions change.
 Models with ordinary blend modes and no offscreen groups draw directly to the
 target.
 
+Packed mesh buffers keep 16 bytes of position/UV per vertex and one 28-byte
+opacity/multiply/screen record per drawable, fetched with GPU instance attributes.
+Geometry and material changes upload independently, adjacent dirty ranges share
+queue writes, and unchanged frames do not upload mesh data. `WgpuMeshUpdate`
+reports geometry/material uploads, queue writes, and bytes transferred. This
+preserves drawable order; it does not batch distinct transparent meshes into a
+single instanced draw.
+
+The built-in draw methods select the packed pipelines automatically. Custom
+passes using packed buffers need `packed_geometry_layout()` in vertex slot 0,
+`packed_material_layout()` in instance slot 1, and the drawable index as
+`first_instance`. The legacy interleaved layout and pipeline accessors remain
+available for `create_wgpu_drawable_buffers()` and manually encoded vertices.
+
+Composition uniforms and bind groups are reused across frames, with uploads
+recorded in the command encoder when parameters change. Full-size offscreen mask
+textures are allocated only for nesting depths that actually use group masks.
+
 See [alignment validation](docs/ayagami-alignment.md) for the models, regression
 coverage, and reference discrepancies checked during this work.
 

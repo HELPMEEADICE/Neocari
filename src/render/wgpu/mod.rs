@@ -24,7 +24,8 @@ pub use crate::render::common::{
 
 pub use buffers::{
     WgpuDrawableBuffers, WgpuMeshBuffers, WgpuMeshUpdate, WgpuMeshUpdateError,
-    create_wgpu_drawable_buffers, drawable_vertex_layout,
+    create_wgpu_drawable_buffers, drawable_vertex_layout, packed_geometry_layout,
+    packed_material_layout,
 };
 pub use clipping::{
     WgpuClippingPlan, WgpuClippingResources, WgpuMaskRenderTarget, WgpuPreparedClippingContext,
@@ -45,15 +46,9 @@ pub use texture::{
 #[derive(Debug)]
 pub struct WgpuLive2dRenderer {
     color_format: wgpu::TextureFormat,
-    normal_pipeline: wgpu::RenderPipeline,
-    additive_pipeline: wgpu::RenderPipeline,
-    multiplicative_pipeline: wgpu::RenderPipeline,
-    screen_pipeline: wgpu::RenderPipeline,
-    mask_pipeline: wgpu::RenderPipeline,
-    masked_normal_pipeline: wgpu::RenderPipeline,
-    masked_additive_pipeline: wgpu::RenderPipeline,
-    masked_multiplicative_pipeline: wgpu::RenderPipeline,
-    masked_screen_pipeline: wgpu::RenderPipeline,
+    pipeline_resources: pipeline::PipelineResources,
+    legacy_pipelines: std::sync::OnceLock<pipeline::Pipelines>,
+    packed_pipelines: pipeline::Pipelines,
     texture_bind_group_layout: wgpu::BindGroupLayout,
     transform_bind_group_layout: wgpu::BindGroupLayout,
     mask_params_bind_group_layout: wgpu::BindGroupLayout,

@@ -7,7 +7,7 @@ use crate::render::common::{
 
 use super::{
     WgpuLive2dRenderer,
-    buffers::drawable_vertex_layout,
+    buffers::{drawable_vertex_layout, packed_geometry_layout, packed_material_layout},
     clipping::{
         WgpuClippingPlan, WgpuClippingResources, WgpuMaskRenderTarget, WgpuPreparedClippingContext,
     },
@@ -27,6 +27,82 @@ pub fn live2d_masked_wgsl_source() -> &'static str {
 
 pub fn mask_wgsl_source() -> &'static str {
     include_str!("../shaders/mask.wgsl")
+}
+
+#[derive(Debug)]
+pub(super) struct Pipelines {
+    unmasked: [wgpu::RenderPipeline; 4],
+    masked: [wgpu::RenderPipeline; 4],
+    mask: wgpu::RenderPipeline,
+}
+
+impl Pipelines {
+    fn select(&self, mode: Moc3DrawableBlendMode, masked: bool) -> &wgpu::RenderPipeline {
+        let index = match mode {
+            Moc3DrawableBlendMode::Normal => 0,
+            Moc3DrawableBlendMode::Additive => 1,
+            Moc3DrawableBlendMode::Multiplicative => 2,
+            Moc3DrawableBlendMode::Screen => 3,
+        };
+        if masked {
+            &self.masked[index]
+        } else {
+            &self.unmasked[index]
+        }
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct PipelineResources {
+    device: wgpu::Device,
+    color_format: wgpu::TextureFormat,
+    pipeline_layout: wgpu::PipelineLayout,
+    masked_pipeline_layout: wgpu::PipelineLayout,
+    mask_pipeline_layout: wgpu::PipelineLayout,
+    shader: wgpu::ShaderModule,
+    masked_shader: wgpu::ShaderModule,
+    mask_shader: wgpu::ShaderModule,
+}
+
+impl PipelineResources {
+    fn create(&self, packed: bool) -> Pipelines {
+        let modes = [
+            Moc3DrawableBlendMode::Normal,
+            Moc3DrawableBlendMode::Additive,
+            Moc3DrawableBlendMode::Multiplicative,
+            Moc3DrawableBlendMode::Screen,
+        ];
+        let pipelines = |layout, shader| {
+            modes.map(|mode| {
+                create_textured_triangle_pipeline(
+                    &self.device,
+                    layout,
+                    shader,
+                    self.color_format,
+                    live2d_blend_state(mode),
+                    if packed {
+                        "live2d.packed.pipeline"
+                    } else {
+                        "live2d.pipeline"
+                    },
+                    packed,
+                )
+            })
+        };
+        Pipelines {
+            unmasked: pipelines(&self.pipeline_layout, &self.shader),
+            masked: pipelines(&self.masked_pipeline_layout, &self.masked_shader),
+            mask: create_textured_triangle_pipeline(
+                &self.device,
+                &self.mask_pipeline_layout,
+                &self.mask_shader,
+                wgpu::TextureFormat::Rgba8Unorm,
+                wgpu_mask_blend_state(),
+                "live2d.mask.pipeline",
+                packed,
+            ),
+        }
+    }
 }
 
 pub fn preferred_surface_format(formats: &[wgpu::TextureFormat]) -> Option<wgpu::TextureFormat> {
@@ -203,38 +279,6 @@ impl WgpuLive2dRenderer {
             bind_group_layouts: &bind_group_layouts,
             immediate_size: 0,
         });
-        let normal_pipeline = create_live2d_pipeline(
-            device,
-            &pipeline_layout,
-            &shader,
-            color_format,
-            Moc3DrawableBlendMode::Normal,
-            "live2d.pipeline.normal",
-        );
-        let additive_pipeline = create_live2d_pipeline(
-            device,
-            &pipeline_layout,
-            &shader,
-            color_format,
-            Moc3DrawableBlendMode::Additive,
-            "live2d.pipeline.additive",
-        );
-        let multiplicative_pipeline = create_live2d_pipeline(
-            device,
-            &pipeline_layout,
-            &shader,
-            color_format,
-            Moc3DrawableBlendMode::Multiplicative,
-            "live2d.pipeline.multiplicative",
-        );
-        let screen_pipeline = create_live2d_pipeline(
-            device,
-            &pipeline_layout,
-            &shader,
-            color_format,
-            Moc3DrawableBlendMode::Screen,
-            "live2d.pipeline.screen",
-        );
         let mask_bind_group_layouts = [
             Some(&texture_bind_group_layout),
             Some(&transform_bind_group_layout),
@@ -245,12 +289,6 @@ impl WgpuLive2dRenderer {
             bind_group_layouts: &mask_bind_group_layouts,
             immediate_size: 0,
         });
-        let mask_pipeline = create_live2d_mask_pipeline(
-            device,
-            &mask_pipeline_layout,
-            &mask_shader,
-            "live2d.mask.pipeline",
-        );
         let masked_bind_group_layouts = [
             Some(&texture_bind_group_layout),
             Some(&transform_bind_group_layout),
@@ -263,52 +301,25 @@ impl WgpuLive2dRenderer {
                 bind_group_layouts: &masked_bind_group_layouts,
                 immediate_size: 0,
             });
-        let masked_normal_pipeline = create_live2d_pipeline(
-            device,
-            &masked_pipeline_layout,
-            &masked_shader,
-            color_format,
-            Moc3DrawableBlendMode::Normal,
-            "live2d.masked.pipeline.normal",
-        );
-        let masked_additive_pipeline = create_live2d_pipeline(
-            device,
-            &masked_pipeline_layout,
-            &masked_shader,
-            color_format,
-            Moc3DrawableBlendMode::Additive,
-            "live2d.masked.pipeline.additive",
-        );
-        let masked_multiplicative_pipeline = create_live2d_pipeline(
-            device,
-            &masked_pipeline_layout,
-            &masked_shader,
-            color_format,
-            Moc3DrawableBlendMode::Multiplicative,
-            "live2d.masked.pipeline.multiplicative",
-        );
-        let masked_screen_pipeline = create_live2d_pipeline(
-            device,
-            &masked_pipeline_layout,
-            &masked_shader,
-            color_format,
-            Moc3DrawableBlendMode::Screen,
-            "live2d.masked.pipeline.screen",
-        );
         let identity_transform =
             create_wgpu_transform(device, &transform_bind_group_layout, &Matrix44::identity());
+        let pipeline_resources = PipelineResources {
+            device: device.clone(),
+            color_format,
+            pipeline_layout,
+            masked_pipeline_layout,
+            mask_pipeline_layout,
+            shader,
+            masked_shader,
+            mask_shader,
+        };
+        let packed_pipelines = pipeline_resources.create(true);
 
         Self {
             color_format,
-            normal_pipeline,
-            additive_pipeline,
-            multiplicative_pipeline,
-            screen_pipeline,
-            mask_pipeline,
-            masked_normal_pipeline,
-            masked_additive_pipeline,
-            masked_multiplicative_pipeline,
-            masked_screen_pipeline,
+            pipeline_resources,
+            legacy_pipelines: std::sync::OnceLock::new(),
+            packed_pipelines,
             texture_bind_group_layout,
             transform_bind_group_layout,
             mask_params_bind_group_layout,
@@ -326,28 +337,59 @@ impl WgpuLive2dRenderer {
         &self,
         blend_mode: Moc3DrawableBlendMode,
     ) -> &wgpu::RenderPipeline {
-        match blend_mode {
-            Moc3DrawableBlendMode::Normal => &self.normal_pipeline,
-            Moc3DrawableBlendMode::Additive => &self.additive_pipeline,
-            Moc3DrawableBlendMode::Multiplicative => &self.multiplicative_pipeline,
-            Moc3DrawableBlendMode::Screen => &self.screen_pipeline,
-        }
+        self.legacy_pipelines().select(blend_mode, false)
+    }
+
+    fn legacy_pipelines(&self) -> &Pipelines {
+        self.legacy_pipelines
+            .get_or_init(|| self.pipeline_resources.create(false))
     }
 
     pub fn mask_pipeline(&self) -> &wgpu::RenderPipeline {
-        &self.mask_pipeline
+        &self.legacy_pipelines().mask
+    }
+
+    /// Pipeline for packed geometry plus a per-drawable instance material stream.
+    pub fn packed_pipeline_for_blend_mode(
+        &self,
+        mode: Moc3DrawableBlendMode,
+        masked: bool,
+    ) -> &wgpu::RenderPipeline {
+        self.packed_pipelines.select(mode, masked)
+    }
+
+    pub fn packed_mask_pipeline(&self) -> &wgpu::RenderPipeline {
+        &self.packed_pipelines.mask
+    }
+
+    pub(super) fn draw_pipeline(
+        &self,
+        mode: Moc3DrawableBlendMode,
+        masked: bool,
+        packed: bool,
+    ) -> &wgpu::RenderPipeline {
+        if packed {
+            self.packed_pipeline_for_blend_mode(mode, masked)
+        } else if masked {
+            self.masked_pipeline_for_blend_mode(mode)
+        } else {
+            self.pipeline_for_blend_mode(mode)
+        }
+    }
+
+    pub(super) fn draw_mask_pipeline(&self, packed: bool) -> &wgpu::RenderPipeline {
+        if packed {
+            &self.packed_pipelines.mask
+        } else {
+            &self.legacy_pipelines().mask
+        }
     }
 
     pub fn masked_pipeline_for_blend_mode(
         &self,
         blend_mode: Moc3DrawableBlendMode,
     ) -> &wgpu::RenderPipeline {
-        match blend_mode {
-            Moc3DrawableBlendMode::Normal => &self.masked_normal_pipeline,
-            Moc3DrawableBlendMode::Additive => &self.masked_additive_pipeline,
-            Moc3DrawableBlendMode::Multiplicative => &self.masked_multiplicative_pipeline,
-            Moc3DrawableBlendMode::Screen => &self.masked_screen_pipeline,
-        }
+        self.legacy_pipelines().select(blend_mode, true)
     }
 
     pub fn texture_bind_group_layout(&self) -> &wgpu::BindGroupLayout {
@@ -622,40 +664,7 @@ impl WgpuLive2dRenderer {
     }
 }
 
-fn create_live2d_pipeline(
-    device: &wgpu::Device,
-    pipeline_layout: &wgpu::PipelineLayout,
-    shader: &wgpu::ShaderModule,
-    color_format: wgpu::TextureFormat,
-    blend_mode: Moc3DrawableBlendMode,
-    label: &'static str,
-) -> wgpu::RenderPipeline {
-    create_textured_triangle_pipeline(
-        device,
-        pipeline_layout,
-        shader,
-        color_format,
-        live2d_blend_state(blend_mode),
-        label,
-    )
-}
-
-fn create_live2d_mask_pipeline(
-    device: &wgpu::Device,
-    pipeline_layout: &wgpu::PipelineLayout,
-    shader: &wgpu::ShaderModule,
-    label: &'static str,
-) -> wgpu::RenderPipeline {
-    create_textured_triangle_pipeline(
-        device,
-        pipeline_layout,
-        shader,
-        wgpu::TextureFormat::Rgba8Unorm,
-        wgpu_mask_blend_state(),
-        label,
-    )
-}
-
+#[allow(clippy::too_many_arguments)]
 fn create_textured_triangle_pipeline(
     device: &wgpu::Device,
     pipeline_layout: &wgpu::PipelineLayout,
@@ -663,8 +672,16 @@ fn create_textured_triangle_pipeline(
     color_format: wgpu::TextureFormat,
     blend_state: wgpu::BlendState,
     label: &'static str,
+    packed: bool,
 ) -> wgpu::RenderPipeline {
-    let vertex_buffers = [Some(drawable_vertex_layout())];
+    let vertex_buffers = if packed {
+        [
+            Some(packed_geometry_layout()),
+            Some(packed_material_layout()),
+        ]
+    } else {
+        [Some(drawable_vertex_layout()), None]
+    };
     let color_targets = [Some(wgpu::ColorTargetState {
         format: color_format,
         blend: Some(blend_state),

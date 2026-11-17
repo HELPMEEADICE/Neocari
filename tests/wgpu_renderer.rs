@@ -360,8 +360,7 @@ fn creates_mask_pipeline_and_encodes_mask_draw_call() {
     );
     let mask_target = renderer.create_mask_render_target(&device, 16).unwrap();
     let mesh = test_mesh_with_draw_order(0, 0.0);
-    let buffers = WgpuMeshBuffers::from_drawables(&device, &[mesh]).unwrap();
-    let drawable = &buffers.drawables()[0];
+    let drawable = neocari::render::wgpu::create_wgpu_drawable_buffers(&device, &mesh).unwrap();
     let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
         label: Some("live2d.test.mask_pipeline_encoder"),
     });
@@ -408,8 +407,7 @@ fn creates_masked_pipeline_and_encodes_masked_draw_call() {
     let clip_params =
         renderer.create_clip_params(&device, &Matrix44::identity(), WgpuMaskChannel::Red, false);
     let mesh = test_mesh_with_draw_order(0, 0.0);
-    let buffers = WgpuMeshBuffers::from_drawables(&device, &[mesh]).unwrap();
-    let drawable = &buffers.drawables()[0];
+    let drawable = neocari::render::wgpu::create_wgpu_drawable_buffers(&device, &mesh).unwrap();
     let target = device.create_texture(&wgpu::TextureDescriptor {
         label: Some("live2d.test.masked_pipeline_target"),
         size: wgpu::Extent3d {

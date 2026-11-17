@@ -251,6 +251,7 @@ fn cases(device: &wgpu::Device, queue: &wgpu::Queue, read: bool) {
     );
     assert_pixel(&pixels, 4, [0.25; 4]);
     assert_eq!(stats.allocated_layers, 3);
+    assert_eq!(stats.allocated_mask_layers, 0);
     plan.offscreens = vec![group(vec![Node::Drawable(2)], 0.5)];
     plan.offscreens[0].multiply_color = [0.5, 0.25, 1.0];
     plan.offscreens[0].screen_color = [0.5, 0.0, 0.0];
@@ -282,6 +283,7 @@ fn cases(device: &wgpu::Device, queue: &wgpu::Queue, read: bool) {
         assert_pixel(&pixels, 1, [if inverted { 0.0 } else { 0.5 }; 4]);
         assert_pixel(&pixels, 6, [if inverted { 0.5 } else { 0.0 }; 4]);
         assert_eq!(stats.allocated_layers, 3);
+        assert_eq!(stats.allocated_mask_layers, 1);
     }
 }
 

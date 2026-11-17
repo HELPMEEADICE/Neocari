@@ -4,10 +4,66 @@ use wgpu::util::DeviceExt;
 
 use crate::moc3::{Moc3DrawableBlendMode, Moc3DrawableMesh};
 use crate::render::common::{
-    ClippingRect, DrawableInfo, DrawableVertex, append_vertices_from_drawable,
-    draw_order_indices_from, draw_order_indices_from_into, encode_indices,
-    encode_vertices_from_drawable,
+    ClippingRect, DrawableInfo, DrawableVertex, draw_order_indices_from,
+    draw_order_indices_from_into, encode_indices, encode_vertices_from_drawable,
 };
+
+const GEOMETRY_STRIDE: usize = 16;
+const MATERIAL_STRIDE: usize = 28;
+
+/// Position/UV stream used by packed mesh buffers (vertex slot 0).
+pub fn packed_geometry_layout() -> wgpu::VertexBufferLayout<'static> {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 2] = wgpu::vertex_attr_array![
+        0 => Float32x2, 1 => Float32x2
+    ];
+    wgpu::VertexBufferLayout {
+        array_stride: GEOMETRY_STRIDE as u64,
+        step_mode: wgpu::VertexStepMode::Vertex,
+        attributes: &ATTRIBUTES,
+    }
+}
+
+/// One opacity/multiply/screen record per drawable (instance slot 1).
+pub fn packed_material_layout() -> wgpu::VertexBufferLayout<'static> {
+    const ATTRIBUTES: [wgpu::VertexAttribute; 3] = wgpu::vertex_attr_array![
+        2 => Float32, 3 => Float32x3, 4 => Float32x3
+    ];
+    wgpu::VertexBufferLayout {
+        array_stride: MATERIAL_STRIDE as u64,
+        step_mode: wgpu::VertexStepMode::Instance,
+        attributes: &ATTRIBUTES,
+    }
+}
+
+fn append_geometry(mesh: &Moc3DrawableMesh, bytes: &mut Vec<u8>) {
+    let start = bytes.len();
+    bytes.resize(start + mesh.vertices().len() * GEOMETRY_STRIDE, 0);
+    for (row, vertex) in bytes[start..]
+        .as_chunks_mut::<GEOMETRY_STRIDE>()
+        .0
+        .iter_mut()
+        .zip(mesh.vertices())
+    {
+        for (chunk, value) in row
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(vertex.position().into_iter().chain(vertex.uv()))
+        {
+            chunk.copy_from_slice(&value.to_ne_bytes());
+        }
+    }
+}
+
+fn append_material(mesh: &Moc3DrawableMesh, bytes: &mut Vec<u8>) {
+    bytes.extend(
+        [mesh.opacity()]
+            .into_iter()
+            .chain(mesh.multiply_color())
+            .chain(mesh.screen_color())
+            .flat_map(f32::to_ne_bytes),
+    );
+}
 
 pub fn drawable_vertex_layout() -> wgpu::VertexBufferLayout<'static> {
     const ATTRIBUTES: [wgpu::VertexAttribute; 5] = [
@@ -71,6 +127,7 @@ struct DrawableVertexSnapshot {
 #[derive(Debug, Copy, Clone)]
 struct DrawableSnapshotChanges {
     vertex_data_changed: bool,
+    material_changed: bool,
     bounds_changed: bool,
 }
 
@@ -90,13 +147,15 @@ impl DrawableVertexSnapshot {
         if self.position_uv_bits.len() != mesh.vertices().len() {
             return DrawableSnapshotChanges {
                 vertex_data_changed: true,
+                material_changed: true,
                 bounds_changed: true,
             };
         }
 
-        let mut vertex_data_changed = self.opacity_bits != mesh.opacity().to_bits()
+        let material_changed = self.opacity_bits != mesh.opacity().to_bits()
             || self.multiply_bits != color_bits(mesh.multiply_color())
             || self.screen_bits != color_bits(mesh.screen_color());
+        let mut vertex_data_changed = false;
         let mut bounds_changed = false;
         for (cached, vertex) in self.position_uv_bits.iter().zip(mesh.vertices()) {
             let position = vertex.position();
@@ -115,6 +174,7 @@ impl DrawableVertexSnapshot {
 
         DrawableSnapshotChanges {
             vertex_data_changed,
+            material_changed,
             bounds_changed,
         }
     }
@@ -132,6 +192,10 @@ impl DrawableVertexSnapshot {
                     uv[1].to_bits(),
                 ]
             }));
+        self.update_material(mesh);
+    }
+
+    fn update_material(&mut self, mesh: &Moc3DrawableMesh) {
         self.opacity_bits = mesh.opacity().to_bits();
         self.multiply_bits = color_bits(mesh.multiply_color());
         self.screen_bits = color_bits(mesh.screen_color());
@@ -141,7 +205,9 @@ impl DrawableVertexSnapshot {
 impl WgpuDrawableBuffers {
     /// Returns the GPU resource containing this drawable's vertices. Mesh buffers
     /// share this resource with other drawables; use `vertex_buffer_slice()` for
-    /// this drawable's range.
+    /// this drawable's range. Packed meshes store only position/UV here; use
+    /// `WgpuMeshBuffers::material_buffer()` with the packed pipeline for colors.
+    /// Standalone drawable buffers retain the interleaved 44-byte layout.
     pub fn vertex_buffer(&self) -> &wgpu::Buffer {
         &self.vertex_buffer
     }
@@ -225,8 +291,10 @@ pub struct WgpuMeshBuffers {
     draw_order_indices: Vec<usize>,
     render_order_seen: Vec<bool>,
     vertex_upload_bytes: Vec<u8>,
+    material_upload_bytes: Vec<u8>,
     packed_vertex_buffer: Option<Arc<wgpu::Buffer>>,
     packed_index_buffer: Option<Arc<wgpu::Buffer>>,
+    packed_material_buffer: Option<wgpu::Buffer>,
     static_geometry: bool,
 }
 
@@ -234,6 +302,9 @@ pub struct WgpuMeshBuffers {
 pub struct WgpuMeshUpdate {
     uploaded_drawables: usize,
     upload_calls: usize,
+    uploaded_bytes: usize,
+    geometry_uploads: usize,
+    material_uploads: usize,
     bounds_changed: bool,
     visibility_changed: bool,
 }
@@ -243,9 +314,21 @@ impl WgpuMeshUpdate {
         self.uploaded_drawables
     }
 
-    /// Number of queue writes used for the changed drawable vertices.
+    /// Number of queue writes used for changed geometry and material records.
     pub fn upload_calls(&self) -> usize {
         self.upload_calls
+    }
+
+    pub fn uploaded_bytes(&self) -> usize {
+        self.uploaded_bytes
+    }
+
+    pub fn geometry_uploads(&self) -> usize {
+        self.geometry_uploads
+    }
+
+    pub fn material_uploads(&self) -> usize {
+        self.material_uploads
     }
 
     pub fn bounds_changed(&self) -> bool {
@@ -300,7 +383,7 @@ pub enum WgpuMeshUpdateError {
 }
 
 impl WgpuMeshBuffers {
-    /// Packs animated geometry into two shared allocations, retaining the same
+    /// Packs animated geometry and instance materials into three shared allocations, retaining the same
     /// per-drawable snapshots and update validation as standalone buffers.
     pub fn from_drawables(device: &wgpu::Device, meshes: &[Moc3DrawableMesh]) -> Option<Self> {
         Self::from_packed_drawables(device, meshes, false).or_else(|| {
@@ -318,10 +401,12 @@ impl WgpuMeshBuffers {
             Some(Self {
                 render_order_seen: Vec::with_capacity(drawables.len()),
                 vertex_upload_bytes: Vec::new(),
+                material_upload_bytes: Vec::new(),
                 drawables,
                 draw_order_indices,
                 packed_vertex_buffer: None,
                 packed_index_buffer: None,
+                packed_material_buffer: None,
                 static_geometry: false,
             })
         })
@@ -348,9 +433,8 @@ impl WgpuMeshBuffers {
                 .iter()
                 .try_fold((0usize, 0usize), |(vertex_total, index_total), mesh| {
                     Some((
-                        vertex_total.checked_add(
-                            mesh.vertices().len().checked_mul(DrawableVertex::STRIDE)?,
-                        )?,
+                        vertex_total
+                            .checked_add(mesh.vertices().len().checked_mul(GEOMETRY_STRIDE)?)?,
                         index_total.checked_add(
                             mesh.indices()
                                 .len()
@@ -362,24 +446,33 @@ impl WgpuMeshBuffers {
         let vertex_buffer_size = u64::try_from(padded_buffer_size(vertex_byte_len)?).ok()?;
         let index_buffer_size = u64::try_from(padded_buffer_size(index_byte_len)?).ok()?;
         let max_buffer_size = device.limits().max_buffer_size;
-        if vertex_buffer_size > max_buffer_size || index_buffer_size > max_buffer_size {
+        let material_byte_len = meshes.len().checked_mul(MATERIAL_STRIDE)?;
+        let material_buffer_size = u64::try_from(padded_buffer_size(material_byte_len)?).ok()?;
+        u32::try_from(meshes.len()).ok()?;
+        if vertex_buffer_size > max_buffer_size
+            || index_buffer_size > max_buffer_size
+            || material_buffer_size > max_buffer_size
+        {
             return None;
         }
 
         let mut vertex_bytes = Vec::new();
         let mut index_bytes = Vec::new();
+        let mut material_bytes = Vec::new();
         vertex_bytes.try_reserve_exact(vertex_byte_len).ok()?;
         index_bytes.try_reserve_exact(index_byte_len).ok()?;
+        material_bytes.try_reserve_exact(material_byte_len).ok()?;
         let mut layouts = Vec::with_capacity(meshes.len());
 
         for mesh in meshes {
             let vertex_count = u32::try_from(mesh.vertices().len()).ok()?;
             let index_count = u32::try_from(mesh.indices().len()).ok()?;
-            let base_vertex = i32::try_from(vertex_bytes.len() / DrawableVertex::STRIDE).ok()?;
+            let base_vertex = i32::try_from(vertex_bytes.len() / GEOMETRY_STRIDE).ok()?;
             let first_index = u32::try_from(index_bytes.len() / std::mem::size_of::<u16>()).ok()?;
             let vertex_start = u64::try_from(vertex_bytes.len()).ok()?;
             let index_start = u64::try_from(index_bytes.len()).ok()?;
-            append_vertices_from_drawable(mesh, &mut vertex_bytes);
+            append_geometry(mesh, &mut vertex_bytes);
+            append_material(mesh, &mut material_bytes);
             for index in mesh.indices() {
                 index_bytes.extend_from_slice(&index.to_ne_bytes());
             }
@@ -427,6 +520,19 @@ impl WgpuMeshBuffers {
                 usage: wgpu::BufferUsages::INDEX,
             }),
         );
+        let material_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("live2d.packed.materials"),
+            contents: if material_bytes.is_empty() {
+                &empty_contents
+            } else {
+                &material_bytes
+            },
+            usage: if static_geometry {
+                wgpu::BufferUsages::VERTEX
+            } else {
+                wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST
+            },
+        });
         let drawables = layouts
             .into_iter()
             .zip(meshes)
@@ -469,10 +575,12 @@ impl WgpuMeshBuffers {
         Some(Self {
             render_order_seen: Vec::with_capacity(drawables.len()),
             vertex_upload_bytes: Vec::new(),
+            material_upload_bytes: Vec::new(),
             drawables,
             draw_order_indices,
             packed_vertex_buffer: Some(vertex_buffer),
             packed_index_buffer: Some(index_buffer),
+            packed_material_buffer: Some(material_buffer),
             static_geometry,
         })
     }
@@ -482,6 +590,19 @@ impl WgpuMeshBuffers {
             self.packed_vertex_buffer.as_deref()?,
             self.packed_index_buffer.as_deref()?,
         ))
+    }
+
+    /// Packed opacity/color instance stream. `None` selects legacy interleaved buffers.
+    pub fn material_buffer(&self) -> Option<&wgpu::Buffer> {
+        self.packed_material_buffer.as_ref()
+    }
+
+    pub(super) fn instance_range(&self, index: usize) -> Range<u32> {
+        if self.packed_material_buffer.is_some() {
+            index as u32..index as u32 + 1
+        } else {
+            0..1
+        }
     }
 
     pub fn drawables(&self) -> &[WgpuDrawableBuffers] {
@@ -526,22 +647,32 @@ impl WgpuMeshBuffers {
         }
 
         let mut uploads = 0;
-        let mut upload_calls = 0;
+        let mut upload_stats = UploadStats::default();
+        let mut geometry_uploads = 0;
+        let mut material_uploads = 0;
         let mut upload_start = 0;
+        let mut material_start = 0;
         let mut bounds_changed = false;
         let mut visibility_changed = false;
         let mut order_changed = false;
         {
-            let (drawables, vertex_upload_bytes) =
-                (&mut self.drawables, &mut self.vertex_upload_bytes);
+            let (drawables, vertex_upload_bytes, material_upload_bytes) = (
+                &mut self.drawables,
+                &mut self.vertex_upload_bytes,
+                &mut self.material_upload_bytes,
+            );
             vertex_upload_bytes.clear();
-            for (drawable, mesh) in drawables.iter_mut().zip(meshes) {
+            material_upload_bytes.clear();
+            for (index, (drawable, mesh)) in drawables.iter_mut().zip(meshes).enumerate() {
                 let changes = drawable
                     .vertex_snapshot
                     .as_ref()
                     .expect("dynamic drawable has a vertex snapshot")
                     .changes(mesh);
-                if changes.vertex_data_changed {
+                let packed = self.packed_vertex_buffer.is_some();
+                let geometry_dirty =
+                    changes.vertex_data_changed || (!packed && changes.material_changed);
+                if geometry_dirty {
                     if !mesh.vertices().is_empty() {
                         if self.packed_vertex_buffer.is_some() {
                             // Adjacent dirty drawables occupy consecutive bytes
@@ -550,32 +681,61 @@ impl WgpuMeshBuffers {
                             if vertex_upload_bytes.is_empty() {
                                 upload_start = drawable.vertex_range.start;
                             }
-                            append_vertices_from_drawable(mesh, vertex_upload_bytes);
+                            append_geometry(mesh, vertex_upload_bytes);
                         } else {
                             encode_vertices_from_drawable(mesh, vertex_upload_bytes);
-                            queue.write_buffer(
+                            flush_upload(
+                                queue,
                                 drawable.vertex_buffer.as_ref(),
                                 drawable.vertex_range.start,
                                 vertex_upload_bytes,
+                                &mut upload_stats,
                             );
-                            upload_calls += 1;
                         }
-                        uploads += 1;
+                        geometry_uploads += 1;
                     }
-                    drawable
-                        .vertex_snapshot
-                        .as_mut()
-                        .expect("dynamic drawable has a vertex snapshot")
-                        .update(mesh);
                 } else if let Some(buffer) = self.packed_vertex_buffer.as_deref()
                     && !vertex_upload_bytes.is_empty()
                     && !mesh.vertices().is_empty()
                 {
                     // Preserve sparse updates: never encode or upload an
                     // unchanged drawable just to bridge two dirty spans.
-                    queue.write_buffer(buffer, upload_start, vertex_upload_bytes);
-                    upload_calls += 1;
-                    vertex_upload_bytes.clear();
+                    flush_upload(
+                        queue,
+                        buffer,
+                        upload_start,
+                        vertex_upload_bytes,
+                        &mut upload_stats,
+                    );
+                }
+                if let Some(buffer) = self.packed_material_buffer.as_ref() {
+                    if changes.material_changed && !mesh.vertices().is_empty() {
+                        if material_upload_bytes.is_empty() {
+                            material_start = (index * MATERIAL_STRIDE) as u64;
+                        }
+                        append_material(mesh, material_upload_bytes);
+                        material_uploads += 1;
+                    } else {
+                        flush_upload(
+                            queue,
+                            buffer,
+                            material_start,
+                            material_upload_bytes,
+                            &mut upload_stats,
+                        );
+                    }
+                }
+                if changes.vertex_data_changed || changes.material_changed {
+                    let snapshot = drawable
+                        .vertex_snapshot
+                        .as_mut()
+                        .expect("dynamic drawable has a vertex snapshot");
+                    if changes.vertex_data_changed {
+                        snapshot.update(mesh);
+                    } else {
+                        snapshot.update_material(mesh);
+                    }
+                    uploads += usize::from(!mesh.vertices().is_empty());
                 }
                 let was_visible = drawable.is_visible();
                 let old_bounds = drawable.info.bounds();
@@ -591,10 +751,24 @@ impl WgpuMeshBuffers {
             if let Some(buffer) = self.packed_vertex_buffer.as_deref()
                 && !vertex_upload_bytes.is_empty()
             {
-                queue.write_buffer(buffer, upload_start, vertex_upload_bytes);
-                upload_calls += 1;
+                flush_upload(
+                    queue,
+                    buffer,
+                    upload_start,
+                    vertex_upload_bytes,
+                    &mut upload_stats,
+                );
             }
             vertex_upload_bytes.clear();
+            if let Some(buffer) = self.packed_material_buffer.as_ref() {
+                flush_upload(
+                    queue,
+                    buffer,
+                    material_start,
+                    material_upload_bytes,
+                    &mut upload_stats,
+                );
+            }
         }
         if order_changed {
             let drawables = &self.drawables;
@@ -609,10 +783,34 @@ impl WgpuMeshBuffers {
 
         Ok(WgpuMeshUpdate {
             uploaded_drawables: uploads,
-            upload_calls,
+            upload_calls: upload_stats.calls,
+            uploaded_bytes: upload_stats.bytes,
+            geometry_uploads,
+            material_uploads,
             bounds_changed,
             visibility_changed,
         })
+    }
+}
+
+#[derive(Default)]
+struct UploadStats {
+    calls: usize,
+    bytes: usize,
+}
+
+fn flush_upload(
+    queue: &wgpu::Queue,
+    buffer: &wgpu::Buffer,
+    offset: u64,
+    bytes: &mut Vec<u8>,
+    stats: &mut UploadStats,
+) {
+    if !bytes.is_empty() {
+        queue.write_buffer(buffer, offset, bytes);
+        stats.calls += 1;
+        stats.bytes += bytes.len();
+        bytes.clear();
     }
 }
 
@@ -767,8 +965,10 @@ mod packed_tests {
             ),
             render_order_seen: Vec::new(),
             vertex_upload_bytes: Vec::new(),
+            material_upload_bytes: Vec::new(),
             packed_vertex_buffer: None,
             packed_index_buffer: None,
+            packed_material_buffer: None,
             static_geometry: false,
         }
     }
@@ -804,7 +1004,7 @@ mod packed_tests {
     fn oversized_packed_buffer_keeps_the_per_drawable_fallback() {
         let (device, queue) = wgpu::Device::noop(&wgpu::DeviceDescriptor {
             required_limits: wgpu::Limits {
-                max_buffer_size: 256,
+                max_buffer_size: 160,
                 ..Default::default()
             },
             ..Default::default()
@@ -828,7 +1028,13 @@ mod packed_tests {
         meshes = scene(1);
         let all = buffers.update_drawables(&queue, &meshes).unwrap();
         assert_eq!(all.uploaded_drawables(), 4);
-        assert_eq!(all.upload_calls(), 1);
+        assert_eq!(all.upload_calls(), 3);
+        assert_eq!(all.geometry_uploads(), 4);
+        assert_eq!(all.material_uploads(), 3);
+        assert_eq!(
+            all.uploaded_bytes(),
+            4 * 3 * GEOMETRY_STRIDE + 3 * MATERIAL_STRIDE
+        );
 
         // Separated dirty ranges must use their actual buffer offsets, without
         // uploading or corrupting the unchanged drawable between them.
@@ -837,7 +1043,13 @@ mod packed_tests {
         meshes[3].set_multiply_color([0.5, 0.8, 0.7]);
         let sparse = buffers.update_drawables(&queue, &meshes).unwrap();
         assert_eq!(sparse.uploaded_drawables(), 3);
-        assert_eq!(sparse.upload_calls(), 2);
+        assert_eq!(sparse.upload_calls(), 3);
+        assert_eq!(sparse.geometry_uploads(), 1);
+        assert_eq!(sparse.material_uploads(), 2);
+        assert_eq!(
+            sparse.uploaded_bytes(),
+            3 * GEOMETRY_STRIDE + 2 * MATERIAL_STRIDE
+        );
         assert!(sparse.bounds_changed());
         assert_eq!(
             buffers
@@ -846,6 +1058,41 @@ mod packed_tests {
                 .upload_calls(),
             0
         );
+    }
+
+    #[test]
+    fn packed_material_changes_never_upload_geometry() {
+        let (device, queue) = wgpu::Device::noop(&Default::default());
+        let mut meshes = scene(0);
+        let mut buffers = WgpuMeshBuffers::from_drawables(&device, &meshes).unwrap();
+        assert_eq!(buffers.drawables[0].vertex_buffer().size(), 4 * 3 * 16);
+        assert_eq!(buffers.material_buffer().unwrap().size(), 4 * 28);
+
+        meshes[0].set_opacity(0.8);
+        meshes[0].set_multiply_color([0.1, 0.2, 0.3]);
+        meshes[0].set_screen_color([0.3, 0.2, 0.1]);
+        let update = buffers.update_drawables(&queue, &meshes).unwrap();
+        assert_eq!(update.uploaded_drawables(), 1);
+        assert_eq!(update.geometry_uploads(), 0);
+        assert_eq!(update.material_uploads(), 1);
+        assert_eq!(update.upload_calls(), 1);
+        assert_eq!(update.uploaded_bytes(), 28);
+        assert!(!update.bounds_changed());
+        assert_eq!(
+            buffers
+                .update_drawables(&queue, &meshes)
+                .unwrap()
+                .uploaded_bytes(),
+            0
+        );
+
+        meshes[0].vertices_mut()[0].set_position([0.5, 0.25]);
+        let update = buffers.update_drawables(&queue, &meshes).unwrap();
+        assert_eq!(update.geometry_uploads(), 1);
+        assert_eq!(update.material_uploads(), 0);
+        assert_eq!(update.uploaded_bytes(), 3 * 16);
+        assert_eq!(update.upload_calls(), 1);
+        assert!(update.bounds_changed());
     }
 
     fn pixels(

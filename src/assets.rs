@@ -495,6 +495,12 @@ pub struct RuntimeModel {
 }
 
 impl RuntimeModel {
+    /// Moves the runtime out of its asset bundle without cloning model data.
+    /// Upload textures and read the model directory before consuming the bundle.
+    pub fn into_runtime(self) -> ModelRuntime {
+        self.runtime
+    }
+
     /// Returns the immutable runtime state.
     pub fn runtime(&self) -> &ModelRuntime {
         &self.runtime

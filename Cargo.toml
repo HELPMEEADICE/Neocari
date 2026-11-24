@@ -42,3 +42,9 @@ required-features = ["wgpu"]
 [[test]]
 name = "wgpu_renderer"
 required-features = ["wgpu"]
+
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = 0

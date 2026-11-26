@@ -2,7 +2,7 @@ use crate::core::Vector2;
 
 use super::{
     Moc3ArtMeshKeyformInfo, Moc3ArtMeshKeyforms, Moc3ArtMeshes, Moc3Deformers, Moc3DrawableMesh,
-    Moc3DrawableVertex, Moc3Ids, Moc3KeyformBindings, Moc3OffscreenInfo, build_moc3_drawable_mesh,
+    Moc3Ids, Moc3KeyformBindings, Moc3OffscreenInfo, build_moc3_drawable_mesh,
     compose::ComposedDeformers, keyform_bindings::Moc3KeyformSlot,
 };
 
@@ -170,7 +170,7 @@ fn build_moc3_drawable_mesh_for_pose(
         parameter_values,
     )?;
     let base_local_keyform_index = slots.first()?.local_index;
-    let mesh = build_moc3_drawable_mesh(
+    let mut mesh = build_moc3_drawable_mesh(
         art_meshes,
         art_mesh_keyforms,
         art_mesh_index,
@@ -182,7 +182,7 @@ fn build_moc3_drawable_mesh_for_pose(
             .mesh_slots(art_mesh_index, parameter_values)?,
     );
     let parent_deformer_index = art_meshes.art_mesh_parent_deformer_index(art_mesh_index)?;
-    let enabled = mesh.is_enabled()
+    let enabled = art_meshes.art_mesh_is_enabled(art_mesh_index)?
         && composed.deformer_is_enabled(parent_deformer_index)
         && bindings.band_is_in_range(
             art_meshes.art_mesh_keyform_binding_band_index(art_mesh_index)?,
@@ -211,27 +211,11 @@ fn build_moc3_drawable_mesh_for_pose(
 
     composed.transform_vertices(parent_deformer_index, &mut positions)?;
 
-    let vertices = mesh
-        .vertices()
-        .iter()
-        .zip(positions)
-        .map(|(vertex, position)| {
-            Moc3DrawableVertex::new([position.x(), -position.y()], vertex.uv())
-        })
-        .collect();
-
-    let blend_mode = mesh.blend_mode();
-    let mut mesh = Moc3DrawableMesh::from_parts_with_render_order(
-        mesh.texture_index(),
-        mesh.drawable_flags(),
-        opacity,
-        draw_order,
-        mesh.render_order(),
-        vertices,
-        mesh.indices().to_vec(),
-        mesh.masks().to_vec(),
-    );
-    mesh.set_blend_mode(blend_mode);
+    for (vertex, position) in mesh.vertices_mut().iter_mut().zip(positions) {
+        vertex.set_position([position.x(), -position.y()]);
+    }
+    mesh.set_opacity(opacity);
+    mesh.set_draw_order(draw_order);
     mesh.set_enabled(enabled);
     mesh.set_multiply_color(multiply_color);
     mesh.set_screen_color(screen_color);
@@ -289,8 +273,7 @@ fn update_moc3_drawable_mesh_for_pose(
         return None;
     }
     for (vertex, position) in mesh.vertices_mut().iter_mut().zip(&scratch.positions) {
-        let uv = vertex.uv();
-        *vertex = Moc3DrawableVertex::new([position.x(), -position.y()], uv);
+        vertex.set_position([position.x(), -position.y()]);
     }
 
     mesh.set_opacity(opacity);

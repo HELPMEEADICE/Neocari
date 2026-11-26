@@ -84,6 +84,7 @@ pub struct WgpuModelResources {
     uniforms: Option<Uniforms>,
     uniform_bytes: Vec<u8>,
     cached_uniform_bytes: Vec<u8>,
+    advanced_blends: Vec<Moc3BlendConfig>,
 }
 
 impl WgpuLive2dRenderer {
@@ -151,6 +152,7 @@ impl WgpuLive2dRenderer {
             uniforms: None,
             uniform_bytes: Vec::new(),
             cached_uniform_bytes: Vec::new(),
+            advanced_blends: Vec::new(),
             fallback_mask: create_surface(device, self, 1, 1, wgpu::TextureFormat::Rgba8Unorm),
             uniform_layout,
             composite_pipeline: pipeline("fs_composite", None),
@@ -300,10 +302,18 @@ impl WgpuModelResources {
     ) -> Result<Uniforms, WgpuModelRenderError> {
         let stride = 64u32.div_ceil(device.limits().min_uniform_buffer_offset_alignment)
             * device.limits().min_uniform_buffer_offset_alignment;
+        // Simple drawables use the fixed-function pipeline. Advanced drawables
+        // with the same blend modes use identical composite parameters.
+        self.advanced_blends.clear();
+        for &blend in &plan.drawable_blends {
+            if blend.is_advanced() && !self.advanced_blends.contains(&blend) {
+                self.advanced_blends.push(blend);
+            }
+        }
         let count = plan
             .offscreens
             .len()
-            .checked_add(plan.drawable_blends.len())
+            .checked_add(self.advanced_blends.len())
             .and_then(|n| n.checked_add(1))
             .ok_or(WgpuModelRenderError::UniformLimit)?;
         let len = (stride as usize)
@@ -355,7 +365,7 @@ impl WgpuModelResources {
                 s.inverted_mask,
             );
         }
-        for (i, &blend) in plan.drawable_blends.iter().enumerate() {
+        for (i, &blend) in self.advanced_blends.iter().enumerate() {
             encode(
                 plan.offscreens.len() + i,
                 blend,
@@ -497,11 +507,16 @@ impl WgpuModelResources {
                     )?);
                     state.flush(&mut pass, frame.meshes);
                 }
+                let slot = self
+                    .advanced_blends
+                    .iter()
+                    .position(|&config| config == blend)
+                    .ok_or(WgpuModelRenderError::InvalidPlan)?;
                 self.composite(
                     encoder,
                     uniforms,
                     depth,
-                    (frame.plan.offscreens.len() + i) as u32 * uniforms.stride,
+                    (frame.plan.offscreens.len() + slot) as u32 * uniforms.stride,
                 );
                 stats.composite_draws += 1;
             } else if let Moc3RenderNode::Offscreen(i) = nodes[index] {
@@ -696,19 +711,25 @@ mod tests {
         let mut plan = Moc3RenderPlan {
             nodes: vec![],
             offscreens: vec![],
-            drawable_blends: vec![Default::default()],
+            drawable_blends: vec![Default::default(); 128],
         };
         let first = resources.uniforms(&device, &mut encoder, &plan).unwrap();
+        assert_eq!(first.buffer.size(), u64::from(first.stride));
         let unchanged = resources.uniforms(&device, &mut encoder, &plan).unwrap();
         assert_eq!(first.buffer, unchanged.buffer);
         assert_eq!(first.bind_group, unchanged.bind_group);
-        plan.drawable_blends[0].color = Moc3ColorBlendMode::Lighten;
-        let changed = resources.uniforms(&device, &mut encoder, &plan).unwrap();
-        assert_eq!(first.buffer, changed.buffer);
-        assert_eq!(first.bind_group, changed.bind_group);
-        plan.drawable_blends.push(Default::default());
+        for blend in &mut plan.drawable_blends {
+            blend.color = Moc3ColorBlendMode::Lighten;
+        }
         let grown = resources.uniforms(&device, &mut encoder, &plan).unwrap();
         assert_ne!(first.buffer, grown.buffer);
+        assert_eq!(grown.buffer.size(), 2 * u64::from(first.stride));
+        for blend in &mut plan.drawable_blends {
+            blend.color = Moc3ColorBlendMode::Overlay;
+        }
+        let changed = resources.uniforms(&device, &mut encoder, &plan).unwrap();
+        assert_eq!(grown.buffer, changed.buffer);
+        assert_eq!(grown.bind_group, changed.bind_group);
         plan.drawable_blends.clear();
         let shrunk = resources.uniforms(&device, &mut encoder, &plan).unwrap();
         assert_eq!(grown.buffer, shrunk.buffer);

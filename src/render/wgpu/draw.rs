@@ -64,8 +64,7 @@ impl WgpuDrawState {
             let first = &buffers.drawables()[batch.first];
             if !batch.indirect
                 && batch.first + batch.len as usize == index
-                && first.base_vertex() == drawable.base_vertex()
-                && first.draw_index_range() == drawable.draw_index_range()
+                && buffers.same_instance_geometry(first, drawable)
             {
                 batch.len += 1;
                 return;

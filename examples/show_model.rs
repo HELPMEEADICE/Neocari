@@ -6,7 +6,7 @@ use neocari::{
     assets::{DecodedTexture, load_model_runtime},
     core::Matrix44,
     expression::load_expression,
-    moc3::{Moc3DrawableMesh, Moc3DrawableVertex},
+    moc3::{Moc3DrawableMesh, Moc3DrawableVertex, Moc3RenderPlan},
     motion::load_motion,
     render::wgpu::{
         WgpuClippingPlan, WgpuClippingResources, WgpuLive2dRenderer, WgpuMaskRenderTarget,
@@ -302,6 +302,7 @@ struct WindowState {
 
 struct LoadedModel {
     runtime: ModelRuntime,
+    plan: Moc3RenderPlan,
     motions: Vec<PathBuf>,
     motion_groups: BTreeMap<String, Vec<PathBuf>>,
     expressions: Vec<PathBuf>,
@@ -869,17 +870,12 @@ impl WindowState {
                 label: Some("show_model.encoder"),
             });
 
-        let plan = self
-            .model
-            .runtime
-            .render_plan()
-            .ok_or(ExampleError("invalid model render plan"))?;
         self.renderer.encode_model(
             &self.device,
             &mut encoder,
             &mut self.model.composition,
             WgpuModelFrame {
-                plan: &plan,
+                plan: &self.model.plan,
                 meshes: &self.model.mesh_buffers,
                 textures: &self.model.textures,
                 clipping: &self.model.clipping_resources,
@@ -1108,6 +1104,9 @@ fn load_rendered_model(
     let runtime = loaded.into_runtime();
 
     let model = LoadedModel {
+        plan: runtime
+            .render_plan()
+            .ok_or(ExampleError("invalid model render plan"))?,
         runtime,
         motions,
         motion_groups,
@@ -1189,10 +1188,17 @@ fn advance_model_frame(
     model.runtime.apply_parameter_overrides();
     model.runtime.apply_physics(delta);
     model.runtime.apply_pose(delta);
-    if model.runtime.update_meshes().is_none() {
-        return Err(Box::new(ExampleError("failed to rebuild model meshes")));
+    if model
+        .runtime
+        .update_meshes_if_needed()
+        .ok_or(ExampleError("failed to rebuild model meshes"))?
+    {
+        model.plan = model
+            .runtime
+            .render_plan()
+            .ok_or(ExampleError("invalid model render plan"))?;
+        update_model_gpu(renderer, device, queue, model)?;
     }
-    update_model_gpu(renderer, device, queue, model)?;
     model.dirty = false;
     Ok(())
 }

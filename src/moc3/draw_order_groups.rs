@@ -75,31 +75,8 @@ impl Moc3DrawOrderGroups {
         if depth > self.groups.len() {
             return None;
         }
-        let group = self.groups.get(index)?;
-        let members = self
-            .objects
-            .get(group.object_begin..group.object_begin.checked_add(group.object_count)?)?;
-        let mut ordered = Vec::with_capacity(members.len());
-        for (offset, member) in members.iter().enumerate() {
-            let order = self.effective_draw_order(
-                index,
-                member,
-                drawable_orders,
-                part_orders,
-                part_enable,
-            )?;
-            ordered.push((
-                order.clamp(
-                    group.base_draw_order,
-                    group.max_draw_order.max(group.base_draw_order),
-                ),
-                offset,
-            ));
-        }
-        ordered.sort_by_key(|&(order, _)| order);
         let mut nodes = Vec::new();
-        for (_, offset) in ordered {
-            let object = &members[offset];
+        for object in self.ordered_members(index, drawable_orders, part_orders, part_enable)? {
             if object.object_type == OBJECT_TYPE_DRAWABLE {
                 nodes.push(Moc3RenderNode::Drawable(object.object_idx));
             } else if object.object_type == OBJECT_TYPE_PART {
@@ -280,26 +257,36 @@ impl Moc3DrawOrderGroups {
         )
     }
 
-    fn effective_draw_order(
+    fn ordered_members(
         &self,
         group_index: usize,
-        object: &GroupObject,
-        drawable_draw_orders: &[i32],
-        part_draw_orders: &[i32],
+        drawable_orders: &[i32],
+        part_orders: &[i32],
         part_enable: &[bool],
-    ) -> Option<i32> {
-        let fallback = self.groups.get(group_index)?.base_draw_order;
-        match object.object_type {
-            OBJECT_TYPE_PART => {
-                if part_enable.get(object.object_idx).copied().unwrap_or(false) {
-                    part_draw_orders.get(object.object_idx).copied()
-                } else {
-                    Some(fallback)
+    ) -> Option<impl Iterator<Item = &GroupObject>> {
+        let group = self.groups.get(group_index)?;
+        let members = self
+            .objects
+            .get(group.object_begin..group.object_begin.checked_add(group.object_count)?)?;
+        let min = group.base_draw_order;
+        let max = group.max_draw_order.max(min);
+        // Order values can be sparse. Store one entry per member and use its
+        // original offset to preserve the model's ordering for ties.
+        let mut ordered = Vec::with_capacity(members.len());
+        for (offset, object) in members.iter().enumerate() {
+            let order = match object.object_type {
+                OBJECT_TYPE_DRAWABLE => *drawable_orders.get(object.object_idx)?,
+                OBJECT_TYPE_PART
+                    if part_enable.get(object.object_idx).copied().unwrap_or(false) =>
+                {
+                    *part_orders.get(object.object_idx)?
                 }
-            }
-            OBJECT_TYPE_DRAWABLE => drawable_draw_orders.get(object.object_idx).copied(),
-            _ => Some(fallback),
+                _ => min,
+            };
+            ordered.push((order.clamp(min, max), offset));
         }
+        ordered.sort_unstable();
+        Some(ordered.into_iter().map(move |(_, offset)| &members[offset]))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -313,65 +300,39 @@ impl Moc3DrawOrderGroups {
         part_offscreen_indices: &[i32],
         render_orders: &mut [i32],
     ) -> Option<()> {
-        let group = self.groups.get(group_index)?;
-        let begin = group.object_begin;
-        let end = begin.checked_add(group.object_count)?;
-        let members = self.objects.get(begin..end)?;
-
-        if members.is_empty() {
-            return Some(());
-        }
-
-        let draw_order_span =
-            (i64::from(group.max_draw_order) - i64::from(group.base_draw_order)).max(0);
-        let bucket_count = usize::try_from(draw_order_span).ok()?.checked_add(1)?;
-        let mut buckets: Vec<Vec<usize>> = vec![Vec::new(); bucket_count];
-
-        for (offset, object) in members.iter().enumerate() {
-            let effective = self.effective_draw_order(
-                group_index,
-                object,
-                drawable_draw_orders,
-                part_draw_orders,
-                part_enable,
-            )?;
-            let relative = i64::from(effective) - i64::from(group.base_draw_order);
-            let bucket = relative.clamp(0, i64::try_from(bucket_count).ok()? - 1);
-            buckets[usize::try_from(bucket).ok()?].push(offset);
-        }
-
         let mut rank = start_rank;
-        for bucket in &buckets {
-            for &offset in bucket {
-                let object = &members[offset];
-                if object.object_type == OBJECT_TYPE_PART {
-                    if let Some(offscreen) = part_offscreen_indices
-                        .get(object.object_idx)
-                        .copied()
-                        .filter(|&value| value >= 0)
-                    {
-                        let slot = self.drawable_count.checked_add(offscreen as usize)?;
-                        *render_orders.get_mut(slot)? = rank;
-                        rank += 1;
-                    }
-                    let child = object.self_group_idx;
-                    if child < self.groups.len() && child != group_index {
-                        self.expand_group(
-                            child,
-                            rank,
-                            drawable_draw_orders,
-                            part_draw_orders,
-                            part_enable,
-                            part_offscreen_indices,
-                            render_orders,
-                        )?;
-                        rank +=
-                            i32::try_from(self.groups.get(child)?.subtree_drawable_count).ok()?;
-                    }
-                } else {
-                    *render_orders.get_mut(object.object_idx)? = rank;
+        for object in self.ordered_members(
+            group_index,
+            drawable_draw_orders,
+            part_draw_orders,
+            part_enable,
+        )? {
+            if object.object_type == OBJECT_TYPE_PART {
+                if let Some(offscreen) = part_offscreen_indices
+                    .get(object.object_idx)
+                    .copied()
+                    .filter(|&value| value >= 0)
+                {
+                    let slot = self.drawable_count.checked_add(offscreen as usize)?;
+                    *render_orders.get_mut(slot)? = rank;
                     rank += 1;
                 }
+                let child = object.self_group_idx;
+                if child < self.groups.len() && child != group_index {
+                    self.expand_group(
+                        child,
+                        rank,
+                        drawable_draw_orders,
+                        part_draw_orders,
+                        part_enable,
+                        part_offscreen_indices,
+                        render_orders,
+                    )?;
+                    rank += i32::try_from(self.groups.get(child)?.subtree_drawable_count).ok()?;
+                }
+            } else {
+                *render_orders.get_mut(object.object_idx)? = rank;
+                rank += 1;
             }
         }
 
@@ -382,6 +343,38 @@ impl Moc3DrawOrderGroups {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sparse_orders_keep_member_order_when_clamped_values_tie() {
+        let groups = Moc3DrawOrderGroups {
+            groups: vec![Group {
+                object_begin: 0,
+                object_count: 4,
+                subtree_drawable_count: 4,
+                base_draw_order: -1_000_000,
+                max_draw_order: 1_000_000,
+            }],
+            objects: [3, 2, 1, 0]
+                .map(|object_idx| GroupObject {
+                    object_type: OBJECT_TYPE_DRAWABLE,
+                    object_idx,
+                    self_group_idx: 0,
+                })
+                .to_vec(),
+            drawable_count: 4,
+        };
+        let orders = [i32::MIN, 9, -1_000_000, 9];
+        assert_eq!(
+            groups.render_orders(&orders, &[], &[], &[], 0).unwrap(),
+            [1, 3, 0, 2]
+        );
+        assert_eq!(
+            groups
+                .render_nodes(&orders, &[], &[], &[], &mut [])
+                .unwrap(),
+            [2, 0, 3, 1].map(crate::moc3::Moc3RenderNode::Drawable)
+        );
+    }
 
     #[test]
     fn empty_group_with_inverted_sentinel_draw_order_range_does_not_panic() {

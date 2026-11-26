@@ -898,6 +898,7 @@ name = "neocari"
 version = "0.4.0"
 dependencies = [
  "ab_glyph",
+ "bytemuck",
  "image",
  "png",
  "pollster",

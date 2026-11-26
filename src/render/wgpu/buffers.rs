@@ -1,19 +1,14 @@
-use std::{
-    collections::HashMap,
-    hash::{DefaultHasher, Hash, Hasher},
-    ops::Range,
-    sync::Arc,
-};
+use std::{collections::HashMap, ops::Range, sync::Arc};
 
 use wgpu::util::DeviceExt;
 
-use crate::moc3::{Moc3DrawableBlendMode, Moc3DrawableMesh};
+use crate::moc3::{Moc3DrawableBlendMode, Moc3DrawableMesh, Moc3DrawableVertex};
 use crate::render::common::{
     ClippingRect, DrawableInfo, DrawableVertex, draw_order_indices_from,
     draw_order_indices_from_into, encode_indices, encode_vertices_from_drawable,
 };
 
-const GEOMETRY_STRIDE: usize = 16;
+const GEOMETRY_STRIDE: usize = size_of::<Moc3DrawableVertex>();
 const MATERIAL_STRIDE: usize = 28;
 pub(super) const INDIRECT_STRIDE: u64 = size_of::<wgpu::util::DrawIndexedIndirectArgs>() as u64;
 pub(super) const INDIRECT_FEATURES: wgpu::Features =
@@ -43,16 +38,8 @@ pub fn packed_material_layout() -> wgpu::VertexBufferLayout<'static> {
     }
 }
 
-fn append_geometry(mesh: &Moc3DrawableMesh, bytes: &mut Vec<u8>) {
-    for vertex in mesh.vertices() {
-        bytes.extend_from_slice(&geometry_record(vertex));
-    }
-}
-
-fn geometry_record(vertex: &crate::moc3::Moc3DrawableVertex) -> [u8; GEOMETRY_STRIDE] {
-    let [x, y] = vertex.position();
-    let [u, v] = vertex.uv();
-    float_record([x, y, u, v])
+fn geometry_bytes(mesh: &Moc3DrawableMesh) -> &[u8] {
+    bytemuck::cast_slice(mesh.vertices())
 }
 
 fn material_record(mesh: &Moc3DrawableMesh) -> [u8; MATERIAL_STRIDE] {
@@ -301,6 +288,7 @@ pub struct WgpuMeshBuffers {
     packed_material_buffer: Option<wgpu::Buffer>,
     indirect: Option<IndirectDraws>,
     static_geometry: bool,
+    has_instance_candidates: bool,
 }
 
 #[derive(Debug)]
@@ -331,32 +319,12 @@ fn encode_indirect_draws(
     bytes
 }
 
-fn static_geometry_key(mesh: &Moc3DrawableMesh) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    mesh.indices().hash(&mut hasher);
-    mesh.vertices().len().hash(&mut hasher);
-    for vertex in mesh.vertices() {
-        hasher.write(&geometry_record(vertex));
-    }
-    hasher.finish()
-}
-
-fn same_static_geometry(a: &Moc3DrawableMesh, b: &Moc3DrawableMesh) -> bool {
-    a.indices() == b.indices()
-        && a.vertices().len() == b.vertices().len()
-        && a.vertices()
-            .iter()
-            .zip(b.vertices())
-            .all(|(a, b)| geometry_record(a) == geometry_record(b))
-}
-
 #[derive(Debug)]
 struct PackedUpload {
     geometry: Vec<u8>,
     materials: Vec<u8>,
 }
 
-#[derive(Clone)]
 struct PackedGeometryLayout {
     vertex_range: Range<u64>,
     index_range: Range<u64>,
@@ -515,6 +483,7 @@ impl WgpuMeshBuffers {
                 packed_material_buffer: None,
                 indirect: None,
                 static_geometry: false,
+                has_instance_candidates: false,
             })
         })
     }
@@ -535,41 +504,39 @@ impl WgpuMeshBuffers {
         meshes: &[Moc3DrawableMesh],
         static_geometry: bool,
     ) -> Option<Self> {
-        let canonical_geometry = static_geometry.then(|| {
-            let mut geometries = HashMap::new();
-            meshes
-                .iter()
-                .enumerate()
-                .map(|(index, mesh)| {
-                    let previous = *geometries.entry(static_geometry_key(mesh)).or_insert(index);
-                    if previous != index && same_static_geometry(&meshes[previous], mesh) {
-                        previous
-                    } else {
-                        index
-                    }
-                })
-                .collect::<Vec<_>>()
-        });
-        let source_index = |index| {
-            canonical_geometry
-                .as_ref()
-                .map_or(index, |sources| sources[index])
-        };
-        let (vertex_byte_len, index_byte_len) = meshes
-            .iter()
-            .enumerate()
-            .filter_map(|(index, mesh)| (source_index(index) == index).then_some(mesh))
-            .try_fold((0usize, 0usize), |(vertex_total, index_total), mesh| {
-                Some((
-                    vertex_total
-                        .checked_add(mesh.vertices().len().checked_mul(GEOMETRY_STRIDE)?)?,
-                    index_total.checked_add(
-                        mesh.indices()
-                            .len()
-                            .checked_mul(std::mem::size_of::<u16>())?,
-                    )?,
-                ))
-            })?;
+        // Indices stay immutable across animation. Each animated drawable keeps
+        // its own vertex range so a later pose can diverge without reallocating.
+        let mut vertex_offsets = HashMap::new();
+        let mut index_offsets = HashMap::new();
+        let mut vertex_byte_len = 0usize;
+        let mut index_byte_len = 0usize;
+        let mut layouts = Vec::with_capacity(meshes.len());
+        for mesh in meshes {
+            let vertices = geometry_bytes(mesh);
+            let vertex_start = if static_geometry {
+                *vertex_offsets.entry(vertices).or_insert(vertex_byte_len)
+            } else {
+                vertex_byte_len
+            };
+            let index_start = *index_offsets
+                .entry(mesh.indices())
+                .or_insert(index_byte_len);
+            let vertex_end = vertex_start.checked_add(vertices.len())?;
+            let index_end = index_start.checked_add(size_of_val(mesh.indices()))?;
+            let first_index = u32::try_from(index_start / size_of::<u16>()).ok()?;
+            let index_count = u32::try_from(mesh.indices().len()).ok()?;
+            first_index.checked_add(index_count)?;
+            layouts.push(PackedGeometryLayout {
+                vertex_range: vertex_start as u64..vertex_end as u64,
+                index_range: index_start as u64..index_end as u64,
+                base_vertex: i32::try_from(vertex_start / GEOMETRY_STRIDE).ok()?,
+                first_index,
+                vertex_count: u32::try_from(mesh.vertices().len()).ok()?,
+                index_count,
+            });
+            vertex_byte_len = vertex_byte_len.max(vertex_end);
+            index_byte_len = index_byte_len.max(index_end);
+        }
         let padded_buffer_size = |size: usize| size.max(4).checked_add(3).map(|size| size & !3);
         let vertex_buffer_size = u64::try_from(padded_buffer_size(vertex_byte_len)?).ok()?;
         let index_buffer_size = u64::try_from(padded_buffer_size(index_byte_len)?).ok()?;
@@ -590,37 +557,15 @@ impl WgpuMeshBuffers {
         vertex_bytes.try_reserve_exact(vertex_byte_len).ok()?;
         index_bytes.try_reserve_exact(index_byte_len).ok()?;
         material_bytes.try_reserve_exact(material_byte_len).ok()?;
-        let mut layouts: Vec<PackedGeometryLayout> = Vec::with_capacity(meshes.len());
 
-        for (index, mesh) in meshes.iter().enumerate() {
+        for (mesh, layout) in meshes.iter().zip(&layouts) {
             material_bytes.extend_from_slice(&material_record(mesh));
-            let source = source_index(index);
-            if source != index {
-                layouts.push(layouts[source].clone());
-                continue;
+            if layout.vertex_range.start == vertex_bytes.len() as u64 {
+                vertex_bytes.extend_from_slice(geometry_bytes(mesh));
             }
-            let vertex_count = u32::try_from(mesh.vertices().len()).ok()?;
-            let index_count = u32::try_from(mesh.indices().len()).ok()?;
-            let base_vertex = i32::try_from(vertex_bytes.len() / GEOMETRY_STRIDE).ok()?;
-            let first_index = u32::try_from(index_bytes.len() / std::mem::size_of::<u16>()).ok()?;
-            let vertex_start = u64::try_from(vertex_bytes.len()).ok()?;
-            let index_start = u64::try_from(index_bytes.len()).ok()?;
-            append_geometry(mesh, &mut vertex_bytes);
-            for index in mesh.indices() {
-                index_bytes.extend_from_slice(&index.to_ne_bytes());
+            if layout.index_range.start == index_bytes.len() as u64 {
+                index_bytes.extend_from_slice(bytemuck::cast_slice(mesh.indices()));
             }
-            first_index.checked_add(index_count)?;
-
-            let vertex_end = u64::try_from(vertex_bytes.len()).ok()?;
-            let index_end = u64::try_from(index_bytes.len()).ok()?;
-            layouts.push(PackedGeometryLayout {
-                vertex_range: vertex_start..vertex_end,
-                index_range: index_start..index_end,
-                first_index,
-                base_vertex,
-                vertex_count,
-                index_count,
-            });
         }
 
         let empty_contents = [0u8; 4];
@@ -709,7 +654,11 @@ impl WgpuMeshBuffers {
             }
         });
 
+        let has_instance_candidates = drawables.windows(2).any(|pair| {
+            !pair[0].is_empty() && pair[0].draw_index_range() == pair[1].draw_index_range()
+        });
         Some(Self {
+            has_instance_candidates,
             render_order_seen: Vec::with_capacity(drawables.len()),
             vertex_upload_bytes: Vec::new(),
             packed_upload: (!static_geometry).then_some(PackedUpload {
@@ -755,7 +704,30 @@ impl WgpuMeshBuffers {
     }
 
     pub(super) fn can_batch_draws(&self) -> bool {
-        self.static_geometry || self.indirect.is_some()
+        self.has_instance_candidates || self.indirect.is_some()
+    }
+
+    /// Called only for consecutive material slots with compatible pass state.
+    /// Compare the uploaded pose bit-for-bit before reusing the first mesh.
+    pub(super) fn same_instance_geometry(
+        &self,
+        first: &WgpuDrawableBuffers,
+        next: &WgpuDrawableBuffers,
+    ) -> bool {
+        if first.draw_index_range() != next.draw_index_range()
+            || first.vertex_count != next.vertex_count
+        {
+            return false;
+        }
+        if first.base_vertex == next.base_vertex {
+            return true;
+        }
+        self.packed_upload.as_ref().is_some_and(|upload| {
+            let vertices = |d: &WgpuDrawableBuffers| {
+                &upload.geometry[d.vertex_range.start as usize..d.vertex_range.end as usize]
+            };
+            vertices(first) == vertices(next)
+        })
     }
 
     pub fn drawables(&self) -> &[WgpuDrawableBuffers] {
@@ -813,22 +785,11 @@ impl WgpuMeshBuffers {
                 if let Some(upload) = &mut self.packed_upload {
                     let range =
                         drawable.vertex_range.start as usize..drawable.vertex_range.end as usize;
-                    let mut geometry_dirty = false;
-                    let mut update_bounds = false;
-                    for (cached, vertex) in upload.geometry[range.clone()]
-                        .as_chunks_mut::<GEOMETRY_STRIDE>()
-                        .0
-                        .iter_mut()
-                        .zip(mesh.vertices())
-                    {
-                        let next = geometry_record(vertex);
-                        if *cached != next {
-                            geometry_dirty = true;
-                            update_bounds |= cached[..8] != next[..8];
-                            *cached = next;
-                        }
-                    }
+                    let next = geometry_bytes(mesh);
+                    let cached = &mut upload.geometry[range.clone()];
+                    let geometry_dirty = cached != next;
                     if geometry_dirty {
+                        cached.copy_from_slice(next);
                         geometry_span.include(
                             range,
                             queue,
@@ -853,7 +814,7 @@ impl WgpuMeshBuffers {
                             &mut upload_stats,
                         );
                     }
-                    (geometry_dirty, material_dirty, update_bounds)
+                    (geometry_dirty, material_dirty, geometry_dirty)
                 } else {
                     let snapshot = drawable.vertex_snapshot.as_mut().unwrap();
                     let changes = snapshot.changes(mesh);
@@ -1108,6 +1069,7 @@ mod packed_tests {
             packed_material_buffer: None,
             indirect: None,
             static_geometry: false,
+            has_instance_candidates: false,
         }
     }
 
@@ -1231,6 +1193,31 @@ mod packed_tests {
         assert_eq!(update.uploaded_bytes(), 3 * 16);
         assert_eq!(update.upload_calls(), 1);
         assert!(update.bounds_changed());
+    }
+
+    #[test]
+    fn animated_instances_split_and_rejoin_as_the_pose_changes() {
+        let (device, queue) = wgpu::Device::noop(&Default::default());
+        let mut meshes = vec![scene(0).remove(2); 2];
+        meshes[1].set_opacity(0.75);
+        let mut buffers = WgpuMeshBuffers::from_drawables(&device, &meshes).unwrap();
+        let can_instance =
+            |b: &WgpuMeshBuffers| b.same_instance_geometry(&b.drawables[0], &b.drawables[1]);
+        assert!(buffers.indirect.is_none());
+        assert!(buffers.can_batch_draws());
+        assert!(can_instance(&buffers));
+        // Three u16 indices plus wgpu's alignment padding, shared by both meshes.
+        assert_eq!(buffers.drawables[0].index_buffer().size(), 8);
+
+        let original = meshes[1].vertices()[0];
+        meshes[1].vertices_mut()[0] = Moc3DrawableVertex::new(original.position(), [0.5, 0.5]);
+        let update = buffers.update_drawables(&queue, &meshes).unwrap();
+        assert_eq!(update.geometry_uploads(), 1);
+        assert!(!update.bounds_changed());
+        assert!(!can_instance(&buffers));
+        meshes[1].vertices_mut()[0] = original;
+        buffers.update_drawables(&queue, &meshes).unwrap();
+        assert!(can_instance(&buffers));
     }
 
     #[test]
@@ -1465,6 +1452,23 @@ mod packed_tests {
             pixels(&device, &queue, &renderer, &static_buffers, &textures),
             original
         );
+        assert_eq!(
+            pixels(&device, &queue, &renderer, &packed, &textures),
+            original
+        );
+
+        let vertex = meshes[1].vertices()[0];
+        meshes[1].vertices_mut()[0].set_position([0.5, 0.25]);
+        packed.update_drawables(&queue, &meshes).unwrap();
+        reference.update_drawables(&queue, &meshes).unwrap();
+        let deformed = pixels(&device, &queue, &renderer, &reference, &textures);
+        assert_ne!(deformed, original);
+        assert_eq!(
+            pixels(&device, &queue, &renderer, &packed, &textures),
+            deformed
+        );
+        meshes[1].vertices_mut()[0] = vertex;
+        packed.update_drawables(&queue, &meshes).unwrap();
         assert_eq!(
             pixels(&device, &queue, &renderer, &packed, &textures),
             original

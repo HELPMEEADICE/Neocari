@@ -130,6 +130,7 @@ impl KeyformColorIndices {
 pub struct Moc3Deformers {
     enabled: Vec<bool>,
     parent_deformer_indices: Vec<i32>,
+    composition_order: Vec<usize>,
     deformer_kinds: Vec<Moc3DeformerKind>,
     specific_indices: Vec<i32>,
     warp_keyform_binding_band_indices: Vec<i32>,
@@ -208,6 +209,16 @@ impl Moc3Deformers {
             })
             .collect::<Result<Vec<_>>>()?;
 
+        let parent_deformer_indices = read_i32_section(
+            bytes,
+            &offsets,
+            DEFORMER_PARENT_DEFORMER_INDICES_SLOT,
+            deformer_count,
+            endianness,
+        )?;
+        let mut composition_order: Vec<_> = (0..deformer_count).collect();
+        composition_order.sort_by_cached_key(|&i| deformer_depth(&parent_deformer_indices, i));
+
         Ok(Self {
             enabled: read_i32_section_or_default(
                 bytes,
@@ -220,13 +231,8 @@ impl Moc3Deformers {
             .into_iter()
             .map(|flag| flag != 0)
             .collect(),
-            parent_deformer_indices: read_i32_section(
-                bytes,
-                &offsets,
-                DEFORMER_PARENT_DEFORMER_INDICES_SLOT,
-                deformer_count,
-                endianness,
-            )?,
+            parent_deformer_indices,
+            composition_order,
             deformer_kinds,
             specific_indices: read_i32_section(
                 bytes,
@@ -444,28 +450,24 @@ impl Moc3Deformers {
         parameter_values: &[f32],
     ) -> Option<ComposedDeformers> {
         let count = self.deformer_kinds.len();
-        let mut order: Vec<usize> = (0..count).collect();
-        order.sort_by_key(|&idx| self.deformer_depth(idx));
-
         let mut composed: Vec<Option<ComposedDeformer>> = vec![None; count];
-        for idx in order {
+        for &idx in &self.composition_order {
             let parent = *self.parent_deformer_indices.get(idx)?;
             let specific = usize::try_from(*self.specific_indices.get(idx)?).ok()?;
             let composed_deformer = match *self.deformer_kinds.get(idx)? {
                 Moc3DeformerKind::Warp => {
-                    let mut grid =
-                        self.interpolated_warp_grid(specific, bindings, parameter_values)?;
+                    let slots = self.warp_keyform_slots(specific, bindings, parameter_values)?;
+                    let mut grid = self.interpolated_warp_grid(specific, &slots)?;
                     let cols = usize::try_from(*self.warp_cols.get(specific)?).ok()?;
                     let rows = usize::try_from(*self.warp_rows.get(specific)?).ok()?;
                     for point in &mut grid {
                         *point = apply_composed_parent(&composed, parent, *point)?;
                     }
                     let scale_accum = parent_scale_accum(&composed, parent);
-                    let opacity =
-                        self.interpolated_warp_opacity(specific, bindings, parameter_values)?;
+                    let opacity = self.interpolated_warp_opacity(specific, &slots)?;
                     let opacity_accum = opacity * parent_opacity_accum(&composed, parent);
                     let (multiply_color, screen_color) = compose_colors(
-                        self.interpolated_warp_colors(specific, bindings, parameter_values)?,
+                        self.interpolated_warp_colors(specific, &slots)?,
                         parent_colors(&composed, parent),
                     );
                     ComposedDeformer::Warp(ComposedWarp {
@@ -489,8 +491,9 @@ impl Moc3Deformers {
                     })
                 }
                 Moc3DeformerKind::Rotation => {
-                    let rotation =
-                        self.interpolated_rotation(specific, bindings, parameter_values)?;
+                    let slots =
+                        self.rotation_keyform_slots(specific, bindings, parameter_values)?;
+                    let rotation = self.interpolated_rotation(specific, &slots)?;
                     let origin = apply_composed_parent(&composed, parent, rotation.translation)?;
                     let (angle_degrees, flip_x, flip_y) = compose_rotation_axes(
                         &composed,
@@ -502,11 +505,10 @@ impl Moc3Deformers {
                         rotation.flip_y,
                     )?;
                     let scale_accum = parent_scale_accum(&composed, parent);
-                    let opacity =
-                        self.interpolated_rotation_opacity(specific, bindings, parameter_values)?;
+                    let opacity = self.interpolated_rotation_opacity(specific, &slots)?;
                     let opacity_accum = opacity * parent_opacity_accum(&composed, parent);
                     let (multiply_color, screen_color) = compose_colors(
-                        self.interpolated_rotation_colors(specific, bindings, parameter_values)?,
+                        self.interpolated_rotation_colors(specific, &slots)?,
                         parent_colors(&composed, parent),
                     );
                     ComposedDeformer::Rotation(ComposedRotation {
@@ -539,30 +541,6 @@ impl Moc3Deformers {
         ))
     }
 
-    fn deformer_depth(&self, index: usize) -> usize {
-        let mut depth = 0usize;
-        let mut current = index;
-        loop {
-            let parent = self
-                .parent_deformer_indices
-                .get(current)
-                .copied()
-                .unwrap_or(-1);
-            if parent < 0 {
-                break;
-            }
-            current = match usize::try_from(parent) {
-                Ok(value) => value,
-                Err(_) => break,
-            };
-            depth += 1;
-            if depth > self.parent_deformer_indices.len() {
-                break;
-            }
-        }
-        depth
-    }
-
     fn warp_keyform_slots(
         &self,
         warp_index: usize,
@@ -570,11 +548,17 @@ impl Moc3Deformers {
         parameter_values: &[f32],
     ) -> Option<Vec<Moc3KeyformSlot>> {
         let keyform_count = usize::try_from(*self.warp_keyform_counts.get(warp_index)?).ok()?;
-        bindings.keyform_slots(
+        let mut slots = bindings.keyform_slots(
             *self.warp_keyform_binding_band_indices.get(warp_index)?,
             keyform_count,
             parameter_values,
-        )
+        )?;
+        slots.extend(
+            bindings
+                .blend_shapes
+                .warp_slots(warp_index, parameter_values)?,
+        );
+        Some(slots)
     }
 
     fn rotation_keyform_slots(
@@ -603,15 +587,8 @@ impl Moc3Deformers {
     fn interpolated_warp_grid(
         &self,
         warp_index: usize,
-        bindings: &Moc3KeyformBindings,
-        parameter_values: &[f32],
+        slots: &[Moc3KeyformSlot],
     ) -> Option<Vec<Vector2>> {
-        let mut slots = self.warp_keyform_slots(warp_index, bindings, parameter_values)?;
-        slots.extend(
-            bindings
-                .blend_shapes
-                .warp_slots(warp_index, parameter_values)?,
-        );
         let begin = usize::try_from(*self.warp_keyform_begin_indices.get(warp_index)?).ok()?;
         let vertex_count = usize::try_from(*self.warp_vertex_counts.get(warp_index)?).ok()?;
         let mut grid = vec![Vector2::default(); vertex_count];
@@ -624,8 +601,8 @@ impl Moc3Deformers {
             }
             for (target, source) in grid.iter_mut().zip(source) {
                 *target = Vector2::new(
-                    target.x() + source.x() * slot.weight,
-                    target.y() + source.y() * slot.weight,
+                    target.x() + source[0] * slot.weight,
+                    target.y() + source[1] * slot.weight,
                 );
             }
         }
@@ -636,10 +613,8 @@ impl Moc3Deformers {
     fn interpolated_rotation(
         &self,
         rotation_index: usize,
-        bindings: &Moc3KeyformBindings,
-        parameter_values: &[f32],
+        slots: &[Moc3KeyformSlot],
     ) -> Option<InterpolatedRotation> {
-        let slots = self.rotation_keyform_slots(rotation_index, bindings, parameter_values)?;
         let begin =
             usize::try_from(*self.rotation_keyform_begin_indices.get(rotation_index)?).ok()?;
         let mut angle = 0.0f32;
@@ -676,15 +651,8 @@ impl Moc3Deformers {
     fn interpolated_warp_opacity(
         &self,
         warp_index: usize,
-        bindings: &Moc3KeyformBindings,
-        parameter_values: &[f32],
+        slots: &[Moc3KeyformSlot],
     ) -> Option<f32> {
-        let mut slots = self.warp_keyform_slots(warp_index, bindings, parameter_values)?;
-        slots.extend(
-            bindings
-                .blend_shapes
-                .warp_slots(warp_index, parameter_values)?,
-        );
         let begin = usize::try_from(*self.warp_keyform_begin_indices.get(warp_index)?).ok()?;
         let mut opacity = 0.0f32;
         for slot in slots {
@@ -697,20 +665,13 @@ impl Moc3Deformers {
     fn interpolated_warp_colors(
         &self,
         warp_index: usize,
-        bindings: &Moc3KeyformBindings,
-        parameter_values: &[f32],
+        slots: &[Moc3KeyformSlot],
     ) -> Option<([f32; 3], [f32; 3])> {
-        let mut slots = self.warp_keyform_slots(warp_index, bindings, parameter_values)?;
         if let Some(indices) = &self.warp_keyform_color_indices {
-            slots.extend(
-                bindings
-                    .blend_shapes
-                    .warp_slots(warp_index, parameter_values)?,
-            );
             let begin = usize::try_from(*self.warp_keyform_begin_indices.get(warp_index)?).ok()?;
             return indices.interpolate(
                 begin,
-                &slots,
+                slots,
                 &self.keyform_multiply_colors,
                 &self.keyform_screen_colors,
             );
@@ -718,7 +679,7 @@ impl Moc3Deformers {
         let begin = *self.warp_keyform_color_begin_indices.get(warp_index)?;
         interpolate_colors(
             begin,
-            &slots,
+            slots,
             &self.keyform_multiply_colors,
             &self.keyform_screen_colors,
         )
@@ -727,10 +688,8 @@ impl Moc3Deformers {
     fn interpolated_rotation_opacity(
         &self,
         rotation_index: usize,
-        bindings: &Moc3KeyformBindings,
-        parameter_values: &[f32],
+        slots: &[Moc3KeyformSlot],
     ) -> Option<f32> {
-        let slots = self.rotation_keyform_slots(rotation_index, bindings, parameter_values)?;
         let begin =
             usize::try_from(*self.rotation_keyform_begin_indices.get(rotation_index)?).ok()?;
         let mut opacity = 0.0f32;
@@ -744,16 +703,14 @@ impl Moc3Deformers {
     fn interpolated_rotation_colors(
         &self,
         rotation_index: usize,
-        bindings: &Moc3KeyformBindings,
-        parameter_values: &[f32],
+        slots: &[Moc3KeyformSlot],
     ) -> Option<([f32; 3], [f32; 3])> {
-        let slots = self.rotation_keyform_slots(rotation_index, bindings, parameter_values)?;
         if let Some(indices) = &self.rotation_keyform_color_indices {
             let begin =
                 usize::try_from(*self.rotation_keyform_begin_indices.get(rotation_index)?).ok()?;
             return indices.interpolate(
                 begin,
-                &slots,
+                slots,
                 &self.keyform_multiply_colors,
                 &self.keyform_screen_colors,
             );
@@ -763,13 +720,13 @@ impl Moc3Deformers {
             .get(rotation_index)?;
         interpolate_colors(
             begin,
-            &slots,
+            slots,
             &self.keyform_multiply_colors,
             &self.keyform_screen_colors,
         )
     }
 
-    fn warp_grid(&self, warp_index: usize, keyform_index: usize) -> Option<Vec<Vector2>> {
+    fn warp_grid(&self, warp_index: usize, keyform_index: usize) -> Option<&[[f32; 2]]> {
         let start = usize::try_from(
             *self
                 .warp_keyform_position_begin_indices
@@ -782,15 +739,21 @@ impl Moc3Deformers {
             .keyform_position_xys
             .get(start..start.checked_add(len)?)?;
 
-        Some(
-            values
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|[x, y]| Vector2::new(*x, *y))
-                .collect(),
-        )
+        Some(values.as_chunks::<2>().0)
     }
+}
+
+fn deformer_depth(parents: &[i32], index: usize) -> usize {
+    let mut current = index;
+    let mut depth = 0;
+    while let Some(parent) = parents.get(current).and_then(|&p| usize::try_from(p).ok()) {
+        depth += 1;
+        if depth > parents.len() {
+            break;
+        }
+        current = parent;
+    }
+    depth
 }
 
 fn read_color_channels(

@@ -16,6 +16,8 @@ const DRAWABLE_BLEND_SCREEN: u8 = 1 << 2;
 /// Inverted clipping-mask flag, shared by MOC2 and MOC3.
 const DRAWABLE_MASK_INVERTED: u8 = 1 << 3;
 
+#[repr(C)]
+#[cfg_attr(feature = "wgpu", derive(bytemuck::Pod, bytemuck::Zeroable))]
 #[derive(Debug, Copy, Clone, PartialEq)]
 /// One vertex in a generated drawable mesh.
 pub struct Moc3DrawableVertex {

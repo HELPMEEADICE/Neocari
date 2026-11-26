@@ -136,6 +136,7 @@ pub struct ModelRuntime {
     pose_fade_time: f32,
     pose_opacities: Vec<f32>,
     meshes: Vec<Moc3DrawableMesh>,
+    last_mesh_parameters: Option<Vec<u32>>,
     mesh_update_scratch: Moc3MeshUpdateScratch,
     drawable_part_opacities: Vec<f32>,
     drawable_draw_orders: Vec<i32>,
@@ -260,6 +261,7 @@ impl ModelRuntime {
             pose_fade_time,
             pose_opacities,
             meshes: Vec::new(),
+            last_mesh_parameters: None,
             mesh_update_scratch: Moc3MeshUpdateScratch::default(),
             drawable_part_opacities: Vec::with_capacity(drawable_count),
             drawable_draw_orders: Vec::with_capacity(drawable_count),
@@ -702,21 +704,10 @@ impl ModelRuntime {
         self.part_opacity_overrides[part_index].unwrap_or(1.0)
     }
 
-    fn update_part_opacities(&mut self) {
-        self.update_direct_part_opacities();
-        self.apply_parent_part_opacities();
-    }
-
-    fn update_direct_part_opacities(&mut self) {
+    fn update_part_opacities(&mut self) -> bool {
+        let mut changed = false;
         for index in 0..self.part_opacities.len() {
-            let base = self.part_drawable_opacity(index);
-            self.part_opacities[index] = base * self.pose_opacities[index];
-        }
-    }
-
-    fn apply_parent_part_opacities(&mut self) {
-        for index in 0..self.part_opacities.len() {
-            let mut opacity = self.part_opacities[index];
+            let mut opacity = self.part_drawable_opacity(index) * self.pose_opacities[index];
             let mut parent = self.parts.parent_part_index(index);
             while let Some(parent_index) = parent.and_then(|p| usize::try_from(p).ok()) {
                 // part_opacities may already contain a parent's inherited
@@ -725,8 +716,10 @@ impl ModelRuntime {
                     self.part_drawable_opacity(parent_index) * self.pose_opacities[parent_index];
                 parent = self.parts.parent_part_index(parent_index);
             }
+            changed |= self.part_opacities[index].to_bits() != opacity.to_bits();
             self.part_opacities[index] = opacity;
         }
+        changed
     }
 
     fn update_drawable_part_opacities(&mut self) {
@@ -753,7 +746,26 @@ impl ModelRuntime {
     /// players, changing part opacities, or advancing pose state. Returns `None`
     /// when the model data cannot produce a valid mesh update.
     pub fn update_meshes(&mut self) -> Option<()> {
-        self.update_part_opacities();
+        self.update_meshes_if_needed().map(|_| ())
+    }
+
+    /// Updates the meshes and reports whether the pose required evaluation.
+    /// A renderer can reuse the previous mesh buffers and render plan on `Some(false)`.
+    pub fn update_meshes_if_needed(&mut self) -> Option<bool> {
+        let opacity_changed = self.update_part_opacities();
+        if !opacity_changed
+            && self.last_mesh_parameters.as_ref().is_some_and(|previous| {
+                previous
+                    .iter()
+                    .copied()
+                    .eq(self.parameter_values.iter().map(|v| v.to_bits()))
+            })
+        {
+            return Some(false);
+        }
+        // An incomplete evaluation must be retried even if the caller restores
+        // the parameters from the last successful frame.
+        let mut previous = self.last_mesh_parameters.take().unwrap_or_default();
         self.update_drawable_part_opacities();
         if self.meshes.len() == self.art_meshes.meshes().len() {
             update_moc3_drawable_meshes_with_parameters_offscreen_and_part_opacities(
@@ -780,7 +792,11 @@ impl ModelRuntime {
                 &self.drawable_part_opacities,
             )?;
         }
-        self.apply_mesh_post_processing()
+        self.apply_mesh_post_processing()?;
+        previous.clear();
+        previous.extend(self.parameter_values.iter().map(|v| v.to_bits()));
+        self.last_mesh_parameters = Some(previous);
+        Some(true)
     }
 
     fn apply_mesh_post_processing(&mut self) -> Option<()> {

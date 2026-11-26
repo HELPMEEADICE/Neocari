@@ -197,8 +197,8 @@ async fn render(options: Options) -> Result<(), Box<dyn Error>> {
 
     let renderer = WgpuLive2dRenderer::new(&device, format);
     let textures = model
-        .textures()
-        .iter()
+        .take_textures()
+        .into_iter()
         .map(|texture| {
             renderer.create_rgba8_texture(
                 &device,
@@ -251,19 +251,33 @@ async fn render(options: Options) -> Result<(), Box<dyn Error>> {
         mapped_at_creation: false,
     });
 
+    let mut clipping_plan = WgpuClippingPlan::from_mesh_buffers(&mesh_buffers);
+    clipping_plan.prepare_single_texture_masks(&mesh_buffers)?;
+    let mut clipping_resources = renderer.create_clipping_resources(&device, &clipping_plan)?;
+    let mut pixels = vec![0; (width * height * 4) as usize];
     for frame in 0..options.frames {
         if frame > 0 {
             model
                 .update(options.delta_seconds)
                 .ok_or("animation update failed")?;
-            mesh_buffers
+            let update = mesh_buffers
                 .update_drawables(&queue, model.meshes())
                 .map_err(|error| error.to_string())?;
+            if update.bounds_changed() || update.visibility_changed() {
+                if update.visibility_changed() {
+                    clipping_plan = WgpuClippingPlan::from_mesh_buffers(&mesh_buffers);
+                }
+                clipping_plan.prepare_single_texture_masks(&mesh_buffers)?;
+                if !renderer.update_clipping_resources(
+                    &queue,
+                    &mut clipping_resources,
+                    &clipping_plan,
+                )? {
+                    clipping_resources =
+                        renderer.create_clipping_resources(&device, &clipping_plan)?;
+                }
+            }
         }
-
-        let mut clipping_plan = WgpuClippingPlan::from_mesh_buffers(&mesh_buffers);
-        clipping_plan.prepare_single_texture_masks(&mesh_buffers)?;
-        let clipping_resources = renderer.create_clipping_resources(&device, &clipping_plan)?;
 
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("render_moc2_animation.encoder"),
@@ -347,7 +361,6 @@ async fn render(options: Options) -> Result<(), Box<dyn Error>> {
         })?;
         receiver.recv()??;
         let mapped = slice.get_mapped_range()?;
-        let mut pixels = vec![0; (width * height * 4) as usize];
         for y in 0..height {
             let source_row = (y * padded_bytes_per_row) as usize;
             let target_row = (y * width * 4) as usize;

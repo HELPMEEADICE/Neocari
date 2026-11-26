@@ -70,6 +70,28 @@ fn setting_a_parameter_changes_mesh_vertices() {
 }
 
 #[test]
+fn unchanged_pose_skips_mesh_evaluation_until_parameters_or_part_opacity_change() {
+    let mut runtime = load_model_runtime("assets/models/Hiyori/Hiyori.model3.json")
+        .unwrap()
+        .into_runtime();
+    let initial = runtime.meshes().to_vec();
+    assert_eq!(runtime.update_meshes_if_needed(), Some(false));
+    assert!(runtime.set_parameter("ParamRibbon", 1.0));
+    assert_eq!(runtime.update_meshes_if_needed(), Some(true));
+    assert_ne!(runtime.meshes(), initial);
+    assert_eq!(runtime.update_meshes_if_needed(), Some(false));
+    runtime.reset_parameters();
+    assert_eq!(runtime.update_meshes_if_needed(), Some(true));
+    assert_eq!(runtime.meshes(), initial);
+    assert!(runtime.set_part_opacity_by_index(0, 0.25));
+    assert_eq!(runtime.update_meshes_if_needed(), Some(true));
+    assert_eq!(runtime.update_meshes_if_needed(), Some(false));
+    runtime.reset_part_opacities();
+    assert_eq!(runtime.update_meshes_if_needed(), Some(true));
+    assert_eq!(runtime.meshes(), initial);
+}
+
+#[test]
 fn runtime_hit_tests_model3_hit_areas() {
     let model = load_model_runtime("assets/models/Mao/Mao.model3.json").unwrap();
     let runtime = model.runtime();

@@ -123,6 +123,11 @@ scratch textures are pooled by nesting depth and rebuilt when dimensions change.
 Models with ordinary blend modes and no offscreen groups draw directly to the
 target.
 
+After applying motion, physics, and pose, `ModelRuntime::update_meshes_if_needed()`
+returns `Some(false)` when the parameter values and effective part opacities
+match the previous evaluation. The viewer reuses its mesh buffers and render
+plan for these frames.
+
 Packed mesh buffers keep 16 bytes of position/UV per vertex and one 28-byte
 opacity/multiply/screen record per drawable, fetched with GPU instance attributes.
 Animated meshes share their immutable indices with the renderer. The packed CPU
@@ -130,8 +135,10 @@ snapshots double as upload data, so adjacent dirty ranges share one queue write.
 `WgpuMeshUpdate` reports geometry/material uploads, queue writes, and bytes
 transferred. Unchanged geometry and materials require no upload.
 
-`WgpuMeshBuffers::from_static_drawables` shares bit-identical geometry and can
-draw adjacent compatible materials as GPU instances of that geometry. Enable
+Packed buffers share identical index lists. Adjacent compatible drawables
+with consecutive material slots and bit-identical positions and UVs can draw
+as GPU instances, including animated meshes. The renderer splits the draw
+when their poses diverge. Static buffers also share identical vertex data. Enable
 `wgpu::Features::INDIRECT_FIRST_INSTANCE` and `MULTI_DRAW_INDIRECT_COUNT` on
 devices that support both to also submit compatible runs of distinct meshes
 with indexed multi-draw indirect. The built-in passes preserve drawable order
@@ -145,7 +152,8 @@ passes using packed buffers need `packed_geometry_layout()` in vertex slot 0,
 `first_instance`. The legacy interleaved layout and pipeline accessors remain
 available for `create_wgpu_drawable_buffers()` and manually encoded vertices.
 
-Composition uniforms and bind groups are reused across frames, with uploads
+Each offscreen group and each distinct advanced drawable blend mode gets one
+composition uniform. Uniform buffers and bind groups are reused across frames, with uploads
 recorded in the command encoder when parameters change. Full-size offscreen mask
 textures are allocated only for nesting depths that actually use group masks.
 Compositing uses one full-size color texture per active nesting depth and a

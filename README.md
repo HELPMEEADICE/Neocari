@@ -125,11 +125,19 @@ target.
 
 Packed mesh buffers keep 16 bytes of position/UV per vertex and one 28-byte
 opacity/multiply/screen record per drawable, fetched with GPU instance attributes.
-Geometry and material changes upload independently, adjacent dirty ranges share
-queue writes, and unchanged frames do not upload mesh data. `WgpuMeshUpdate`
-reports geometry/material uploads, queue writes, and bytes transferred. This
-preserves drawable order; it does not batch distinct transparent meshes into a
-single instanced draw.
+Animated meshes share their immutable indices with the renderer. The packed CPU
+snapshots double as upload data, so adjacent dirty ranges share one queue write.
+`WgpuMeshUpdate` reports geometry/material uploads, queue writes, and bytes
+transferred. Unchanged geometry and materials require no upload.
+
+`WgpuMeshBuffers::from_static_drawables` shares bit-identical geometry and can
+draw adjacent compatible materials as GPU instances of that geometry. Enable
+`wgpu::Features::INDIRECT_FIRST_INSTANCE` and `MULTI_DRAW_INDIRECT_COUNT` on
+devices that support both to also submit compatible runs of distinct meshes
+with indexed multi-draw indirect. The built-in passes preserve drawable order
+and split runs when the texture, blend mode, or clipping context changes.
+`show_model` requests the available features and runs with direct draws on
+devices without indirect batching support.
 
 The built-in draw methods select the packed pipelines automatically. Custom
 passes using packed buffers need `packed_geometry_layout()` in vertex slot 0,
@@ -140,6 +148,9 @@ available for `create_wgpu_drawable_buffers()` and manually encoded vertices.
 Composition uniforms and bind groups are reused across frames, with uploads
 recorded in the command encoder when parameters change. Full-size offscreen mask
 textures are allocated only for nesting depths that actually use group masks.
+Compositing uses one full-size color texture per active nesting depth and a
+shared output texture. Each composite samples its parent directly and swaps
+the output into the parent layer, avoiding a full-size backdrop copy.
 
 See [alignment validation](docs/ayagami-alignment.md) for the models, regression
 coverage, and reference discrepancies checked during this work.

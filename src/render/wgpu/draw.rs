@@ -1,17 +1,145 @@
 use super::{
     WgpuLive2dRenderer,
-    buffers::WgpuMeshBuffers,
+    buffers::{INDIRECT_STRIDE, WgpuDrawableBuffers, WgpuMeshBuffers},
     clipping::{WgpuClippingResources, WgpuMaskRenderTarget},
     texture::{WgpuTexture, WgpuTransform},
 };
+use crate::moc3::Moc3DrawableBlendMode;
 
 /// Tracks bindings only within one render pass; never reuse after other drawing.
 #[derive(Default)]
 pub(super) struct WgpuDrawState {
     bound_buffers: bool,
-    pipeline: Option<(crate::moc3::Moc3DrawableBlendMode, bool)>,
+    pipeline: Option<(Moc3DrawableBlendMode, bool)>,
     texture: Option<i32>,
     clipping_context: Option<usize>,
+    batch: Option<DrawBatch>,
+}
+
+struct DrawBatch {
+    first: usize,
+    len: u32,
+    indirect: bool,
+}
+
+impl WgpuDrawState {
+    fn bind_packed_buffers(&mut self, pass: &mut wgpu::RenderPass<'_>, buffers: &WgpuMeshBuffers) {
+        if !self.bound_buffers {
+            if let Some((vertices, indices)) = buffers.packed_buffers() {
+                pass.set_vertex_buffer(0, vertices.slice(..));
+                pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint16);
+                pass.set_vertex_buffer(1, buffers.material_buffer().unwrap().slice(..));
+            }
+            self.bound_buffers = true;
+        }
+    }
+
+    fn bind_texture<'a>(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'_>,
+        buffers: &WgpuMeshBuffers,
+        texture_index: i32,
+        bind_group: impl FnOnce(i32) -> Result<&'a wgpu::BindGroup, WgpuRenderError>,
+    ) -> Result<(), WgpuRenderError> {
+        if self.texture != Some(texture_index) {
+            self.flush(pass, buffers);
+            pass.set_bind_group(0, bind_group(texture_index)?, &[]);
+            self.texture = Some(texture_index);
+        }
+        Ok(())
+    }
+
+    fn push(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'_>,
+        buffers: &WgpuMeshBuffers,
+        index: usize,
+        drawable: &WgpuDrawableBuffers,
+    ) {
+        if !buffers.can_batch_draws() {
+            draw_direct(pass, buffers, drawable, index, 1);
+            return;
+        }
+        if let Some(batch) = &mut self.batch {
+            let first = &buffers.drawables()[batch.first];
+            if !batch.indirect
+                && batch.first + batch.len as usize == index
+                && first.base_vertex() == drawable.base_vertex()
+                && first.draw_index_range() == drawable.draw_index_range()
+            {
+                batch.len += 1;
+                return;
+            }
+            if (batch.len == 1 || batch.indirect)
+                && let Some(slot) = buffers.indirect_slot(batch.first)
+                && buffers.indirect_slot(index) == Some(slot + batch.len)
+            {
+                batch.indirect = true;
+                batch.len += 1;
+                return;
+            }
+        }
+        self.flush(pass, buffers);
+        self.batch = Some(DrawBatch {
+            first: index,
+            len: 1,
+            indirect: false,
+        });
+    }
+
+    pub(super) fn flush(&mut self, pass: &mut wgpu::RenderPass<'_>, buffers: &WgpuMeshBuffers) {
+        let Some(batch) = self.batch.take() else {
+            return;
+        };
+        if batch.indirect {
+            pass.multi_draw_indexed_indirect(
+                buffers.indirect_buffer().unwrap(),
+                u64::from(buffers.indirect_slot(batch.first).unwrap()) * INDIRECT_STRIDE,
+                batch.len,
+            );
+            return;
+        }
+        draw_direct(
+            pass,
+            buffers,
+            &buffers.drawables()[batch.first],
+            batch.first,
+            batch.len,
+        );
+    }
+
+    pub(super) fn push_mask<'a>(
+        &mut self,
+        pass: &mut wgpu::RenderPass<'_>,
+        buffers: &WgpuMeshBuffers,
+        index: usize,
+        drawable: &WgpuDrawableBuffers,
+        bind_group: impl FnOnce(i32) -> Result<&'a wgpu::BindGroup, WgpuRenderError>,
+    ) -> Result<(), WgpuRenderError> {
+        self.bind_texture(pass, buffers, drawable.texture_index(), bind_group)?;
+        self.bind_packed_buffers(pass, buffers);
+        self.push(pass, buffers, index, drawable);
+        Ok(())
+    }
+}
+
+fn draw_direct(
+    pass: &mut wgpu::RenderPass<'_>,
+    buffers: &WgpuMeshBuffers,
+    drawable: &WgpuDrawableBuffers,
+    index: usize,
+    count: u32,
+) {
+    if buffers.material_buffer().is_none() {
+        pass.set_vertex_buffer(0, drawable.vertex_buffer_slice());
+        pass.set_index_buffer(drawable.index_buffer_slice(), wgpu::IndexFormat::Uint16);
+    }
+    let start = buffers.instance_range(index).start;
+    pass.draw_indexed(
+        drawable.draw_index_range(),
+        drawable.base_vertex(),
+        start..start + count,
+    );
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -45,7 +173,7 @@ impl WgpuLive2dRenderer {
         clipping: &WgpuClippingResources,
         mask: &WgpuMaskRenderTarget,
         transform: &WgpuTransform,
-        blend: crate::moc3::Moc3DrawableBlendMode,
+        blend: Moc3DrawableBlendMode,
     ) -> Result<bool, WgpuRenderError> {
         let drawable = buffers
             .drawables()
@@ -56,52 +184,75 @@ impl WgpuLive2dRenderer {
         if !drawable.is_visible() {
             return Ok(false);
         }
-        let packed = buffers.material_buffer().is_some();
+        self.push_drawable(
+            pass,
+            state,
+            buffers,
+            index,
+            drawable,
+            blend,
+            transform,
+            Some((clipping, mask.bind_group())),
+            |index| texture_bind_group_from_textures(textures, index),
+        )?;
+        Ok(true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn push_drawable<'a>(
+        &self,
+        pass: &mut wgpu::RenderPass<'_>,
+        state: &mut WgpuDrawState,
+        buffers: &WgpuMeshBuffers,
+        index: usize,
+        drawable: &WgpuDrawableBuffers,
+        blend: Moc3DrawableBlendMode,
+        transform: &WgpuTransform,
+        clipping: Option<(&WgpuClippingResources, &wgpu::BindGroup)>,
+        bind_group: impl FnOnce(i32) -> Result<&'a wgpu::BindGroup, WgpuRenderError>,
+    ) -> Result<(), WgpuRenderError> {
         let masked = !drawable.masks().is_empty();
-        if state.texture != Some(drawable.texture_index()) {
-            let texture = texture_bind_group_from_textures(textures, drawable.texture_index())?;
-            pass.set_bind_group(0, texture, &[]);
-            state.texture = Some(drawable.texture_index());
-        }
+        let context = if masked {
+            let (resources, mask) = clipping.ok_or(WgpuRenderError::UnsupportedClippingMasks {
+                drawable_index: index,
+                mask_count: drawable.masks().len(),
+            })?;
+            let context = resources.context_for_drawable(index).ok_or(
+                WgpuRenderError::MissingClippingContext {
+                    drawable_index: index,
+                },
+            )?;
+            Some((resources.drawable_context_indices[index], context, mask))
+        } else {
+            None
+        };
+        state.bind_texture(pass, buffers, drawable.texture_index(), bind_group)?;
         if state.pipeline != Some((blend, masked)) {
-            pass.set_pipeline(self.draw_pipeline(blend, masked, packed));
+            state.flush(pass, buffers);
+            pass.set_pipeline(self.draw_pipeline(
+                blend,
+                masked,
+                buffers.material_buffer().is_some(),
+            ));
             if state.pipeline.map(|p| p.1) != Some(masked) {
                 state.clipping_context = None;
             }
             state.pipeline = Some((blend, masked));
         }
-        if masked {
-            let context = clipping.context_for_drawable(index).ok_or(
-                WgpuRenderError::MissingClippingContext {
-                    drawable_index: index,
-                },
-            )?;
-            let context_index = clipping.drawable_context_indices[index];
-            if state.clipping_context != context_index {
-                pass.set_bind_group(2, mask.bind_group(), &[]);
-                pass.set_bind_group(3, context.clip_params().bind_group(), &[]);
-                state.clipping_context = context_index;
-            }
+        if let Some((context_index, context, mask)) = context
+            && state.clipping_context != context_index
+        {
+            state.flush(pass, buffers);
+            pass.set_bind_group(2, mask, &[]);
+            pass.set_bind_group(3, context.clip_params().bind_group(), &[]);
+            state.clipping_context = context_index;
         }
         if !state.bound_buffers {
             pass.set_bind_group(1, transform.bind_group(), &[]);
-            if let Some((vertices, indices)) = buffers.packed_buffers() {
-                pass.set_vertex_buffer(0, vertices.slice(..));
-                pass.set_index_buffer(indices.slice(..), wgpu::IndexFormat::Uint16);
-                pass.set_vertex_buffer(1, buffers.material_buffer().unwrap().slice(..));
-            }
-            state.bound_buffers = true;
+            state.bind_packed_buffers(pass, buffers);
         }
-        if !packed {
-            pass.set_vertex_buffer(0, drawable.vertex_buffer_slice());
-            pass.set_index_buffer(drawable.index_buffer_slice(), wgpu::IndexFormat::Uint16);
-        }
-        pass.draw_indexed(
-            drawable.draw_index_range(),
-            drawable.base_vertex(),
-            buffers.instance_range(index),
-        );
-        Ok(true)
+        state.push(pass, buffers, index, drawable);
+        Ok(())
     }
     pub fn draw(
         &self,
@@ -182,12 +333,11 @@ impl WgpuLive2dRenderer {
         mask_target: &WgpuMaskRenderTarget,
         transform: &WgpuTransform,
     ) -> Result<u32, WgpuRenderError> {
-        self.draw_with_clipping_bind_group_provider(
+        self.draw_ordered(
             render_pass,
             mesh_buffers,
-            clipping_resources,
-            mask_target.bind_group(),
             transform,
+            Some((clipping_resources, mask_target.bind_group())),
             |texture_index| texture_bind_group_from_textures(textures, texture_index),
         )
     }
@@ -227,52 +377,15 @@ impl WgpuLive2dRenderer {
         render_pass: &mut wgpu::RenderPass<'_>,
         mesh_buffers: &WgpuMeshBuffers,
         transform: &WgpuTransform,
-        mut bind_group_for_texture: impl FnMut(i32) -> Result<&'a wgpu::BindGroup, WgpuRenderError>,
+        bind_group_for_texture: impl FnMut(i32) -> Result<&'a wgpu::BindGroup, WgpuRenderError>,
     ) -> Result<u32, WgpuRenderError> {
-        let mut drawn = 0;
-        let packed_buffers = mesh_buffers.packed_buffers();
-        if let Some((vertex_buffer, index_buffer)) = packed_buffers {
-            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.set_vertex_buffer(1, mesh_buffers.material_buffer().unwrap().slice(..));
-        }
-        for &drawable_index in mesh_buffers.draw_order_indices() {
-            let drawable = mesh_buffers
-                .drawables()
-                .get(drawable_index)
-                .ok_or(WgpuRenderError::MissingDrawable { drawable_index })?;
-            if !drawable.is_visible() {
-                continue;
-            }
-            if !drawable.masks().is_empty() {
-                return Err(WgpuRenderError::UnsupportedClippingMasks {
-                    drawable_index,
-                    mask_count: drawable.masks().len(),
-                });
-            }
-            let texture_bind_group = bind_group_for_texture(drawable.texture_index())?;
-
-            render_pass.set_pipeline(self.draw_pipeline(
-                drawable.blend_mode(),
-                false,
-                packed_buffers.is_some(),
-            ));
-            render_pass.set_bind_group(0, texture_bind_group, &[]);
-            render_pass.set_bind_group(1, transform.bind_group(), &[]);
-            if packed_buffers.is_none() {
-                render_pass.set_vertex_buffer(0, drawable.vertex_buffer_slice());
-                render_pass
-                    .set_index_buffer(drawable.index_buffer_slice(), wgpu::IndexFormat::Uint16);
-            }
-            render_pass.draw_indexed(
-                drawable.draw_index_range(),
-                drawable.base_vertex(),
-                mesh_buffers.instance_range(drawable_index),
-            );
-            drawn += 1;
-        }
-
-        Ok(drawn)
+        self.draw_ordered(
+            render_pass,
+            mesh_buffers,
+            transform,
+            None,
+            bind_group_for_texture,
+        )
     }
 
     fn draw_masks_with_bind_group_provider<'a>(
@@ -283,106 +396,66 @@ impl WgpuLive2dRenderer {
         mut bind_group_for_texture: impl FnMut(i32) -> Result<&'a wgpu::BindGroup, WgpuRenderError>,
     ) -> Result<u32, WgpuRenderError> {
         let mut drawn = 0;
-        let packed_buffers = mesh_buffers.packed_buffers();
-        if let Some((vertex_buffer, index_buffer)) = packed_buffers {
-            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.set_vertex_buffer(1, mesh_buffers.material_buffer().unwrap().slice(..));
-        }
-        render_pass.set_pipeline(self.draw_mask_pipeline(packed_buffers.is_some()));
+        let mut state = WgpuDrawState::default();
+        render_pass.set_pipeline(self.draw_mask_pipeline(mesh_buffers.material_buffer().is_some()));
         for context in clipping_resources.contexts() {
             render_pass.set_bind_group(1, context.mask_transform().bind_group(), &[]);
             render_pass.set_bind_group(2, context.mask_params().bind_group(), &[]);
             for &drawable_index in context.mask_drawable_indices() {
-                let drawable = mesh_buffers
-                    .drawables()
-                    .get(drawable_index)
-                    .ok_or(WgpuRenderError::MissingDrawable { drawable_index })?;
+                let Some(drawable) = mesh_buffers.drawables().get(drawable_index) else {
+                    state.flush(render_pass, mesh_buffers);
+                    return Err(WgpuRenderError::MissingDrawable { drawable_index });
+                };
                 if drawable.is_empty() || !drawable.info().is_enabled() {
                     continue;
                 }
-                let texture_bind_group = bind_group_for_texture(drawable.texture_index())?;
-
-                render_pass.set_bind_group(0, texture_bind_group, &[]);
-                if packed_buffers.is_none() {
-                    render_pass.set_vertex_buffer(0, drawable.vertex_buffer_slice());
-                    render_pass
-                        .set_index_buffer(drawable.index_buffer_slice(), wgpu::IndexFormat::Uint16);
-                }
-                render_pass.draw_indexed(
-                    drawable.draw_index_range(),
-                    drawable.base_vertex(),
-                    mesh_buffers.instance_range(drawable_index),
-                );
+                state.push_mask(
+                    render_pass,
+                    mesh_buffers,
+                    drawable_index,
+                    drawable,
+                    &mut bind_group_for_texture,
+                )?;
                 drawn += 1;
             }
+            state.flush(render_pass, mesh_buffers);
         }
 
         Ok(drawn)
     }
 
-    fn draw_with_clipping_bind_group_provider<'a>(
+    fn draw_ordered<'a>(
         &self,
         render_pass: &mut wgpu::RenderPass<'_>,
         mesh_buffers: &WgpuMeshBuffers,
-        clipping_resources: &WgpuClippingResources,
-        mask_bind_group: &wgpu::BindGroup,
         transform: &WgpuTransform,
+        clipping: Option<(&WgpuClippingResources, &wgpu::BindGroup)>,
         mut bind_group_for_texture: impl FnMut(i32) -> Result<&'a wgpu::BindGroup, WgpuRenderError>,
     ) -> Result<u32, WgpuRenderError> {
         let mut drawn = 0;
-        let packed_buffers = mesh_buffers.packed_buffers();
-        if let Some((vertex_buffer, index_buffer)) = packed_buffers {
-            render_pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            render_pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint16);
-            render_pass.set_vertex_buffer(1, mesh_buffers.material_buffer().unwrap().slice(..));
-        }
-        for &drawable_index in mesh_buffers.draw_order_indices() {
-            let drawable = mesh_buffers
-                .drawables()
-                .get(drawable_index)
-                .ok_or(WgpuRenderError::MissingDrawable { drawable_index })?;
+        let mut state = WgpuDrawState::default();
+        for &index in mesh_buffers.draw_order_indices() {
+            let drawable = &mesh_buffers.drawables()[index];
             if !drawable.is_visible() {
                 continue;
             }
-            let texture_bind_group = bind_group_for_texture(drawable.texture_index())?;
-
-            if drawable.masks().is_empty() {
-                render_pass.set_pipeline(self.draw_pipeline(
-                    drawable.blend_mode(),
-                    false,
-                    packed_buffers.is_some(),
-                ));
-                render_pass.set_bind_group(0, texture_bind_group, &[]);
-                render_pass.set_bind_group(1, transform.bind_group(), &[]);
-            } else {
-                let context = clipping_resources
-                    .context_for_drawable(drawable_index)
-                    .ok_or(WgpuRenderError::MissingClippingContext { drawable_index })?;
-                render_pass.set_pipeline(self.draw_pipeline(
-                    drawable.blend_mode(),
-                    true,
-                    packed_buffers.is_some(),
-                ));
-                render_pass.set_bind_group(0, texture_bind_group, &[]);
-                render_pass.set_bind_group(1, transform.bind_group(), &[]);
-                render_pass.set_bind_group(2, mask_bind_group, &[]);
-                render_pass.set_bind_group(3, context.clip_params().bind_group(), &[]);
+            if let Err(error) = self.push_drawable(
+                render_pass,
+                &mut state,
+                mesh_buffers,
+                index,
+                drawable,
+                drawable.blend_mode(),
+                transform,
+                clipping,
+                &mut bind_group_for_texture,
+            ) {
+                state.flush(render_pass, mesh_buffers);
+                return Err(error);
             }
-
-            if packed_buffers.is_none() {
-                render_pass.set_vertex_buffer(0, drawable.vertex_buffer_slice());
-                render_pass
-                    .set_index_buffer(drawable.index_buffer_slice(), wgpu::IndexFormat::Uint16);
-            }
-            render_pass.draw_indexed(
-                drawable.draw_index_range(),
-                drawable.base_vertex(),
-                mesh_buffers.instance_range(drawable_index),
-            );
             drawn += 1;
         }
-
+        state.flush(render_pass, mesh_buffers);
         Ok(drawn)
     }
 }

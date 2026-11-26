@@ -406,7 +406,9 @@ impl WindowState {
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("show_model.device"),
-                required_features: wgpu::Features::empty(),
+                required_features: adapter.features()
+                    & (wgpu::Features::INDIRECT_FIRST_INSTANCE
+                        | wgpu::Features::MULTI_DRAW_INDIRECT_COUNT),
                 required_limits: wgpu::Limits::default(),
                 ..Default::default()
             })

@@ -42,6 +42,7 @@ pub struct WgpuModelTarget<'a> {
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct WgpuModelRenderStats {
+    /// Number of drawables rendered across model passes, including batched drawables.
     pub drawable_draws: u32,
     pub composite_draws: u32,
     pub allocated_layers: usize,
@@ -50,14 +51,12 @@ pub struct WgpuModelRenderStats {
 
 #[derive(Debug)]
 struct Surface {
-    texture: wgpu::Texture,
     view: wgpu::TextureView,
     bind_group: wgpu::BindGroup,
 }
 #[derive(Debug)]
 struct Layer {
     color: Surface,
-    backdrop: Surface,
     mask: Option<Surface>,
 }
 #[derive(Debug, Clone)]
@@ -76,6 +75,7 @@ pub struct WgpuModelResources {
     width: u32,
     height: u32,
     layers: Vec<Layer>,
+    composite_output: Option<Surface>,
     uniform_layout: wgpu::BindGroupLayout,
     composite_pipeline: wgpu::RenderPipeline,
     present_pipeline: wgpu::RenderPipeline,
@@ -147,6 +147,7 @@ impl WgpuLive2dRenderer {
             width: 0,
             height: 0,
             layers: Vec::new(),
+            composite_output: None,
             uniforms: None,
             uniform_bytes: Vec::new(),
             cached_uniform_bytes: Vec::new(),
@@ -193,6 +194,7 @@ impl WgpuLive2dRenderer {
         }
         if resources.width != target.width || resources.height != target.height {
             resources.layers.clear();
+            resources.composite_output = None;
             resources.width = target.width;
             resources.height = target.height;
         }
@@ -235,6 +237,7 @@ impl WgpuLive2dRenderer {
                     simple_blend_mode(blend),
                 )?);
             }
+            state.flush(&mut pass, frame.meshes);
             stats.allocated_layers = resources.layers.len();
             stats.allocated_mask_layers =
                 resources.layers.iter().filter(|l| l.mask.is_some()).count();
@@ -259,7 +262,7 @@ impl WgpuLive2dRenderer {
             pass.set_pipeline(&resources.present_pipeline);
             let layer = &resources.layers[0];
             pass.set_bind_group(0, &layer.color.bind_group, &[]);
-            pass.set_bind_group(1, &layer.backdrop.bind_group, &[]);
+            pass.set_bind_group(1, &resources.fallback_mask.bind_group, &[]);
             pass.set_bind_group(2, &resources.fallback_mask.bind_group, &[]);
             pass.set_bind_group(3, &uniforms.bind_group, &[uniforms.identity]);
             pass.draw(0..3, 0..1);
@@ -275,9 +278,17 @@ impl WgpuModelResources {
         while self.layers.len() <= depth {
             self.layers.push(Layer {
                 color: create_surface(device, renderer, self.width, self.height, self.format),
-                backdrop: create_surface(device, renderer, self.width, self.height, self.format),
                 mask: None,
             });
+        }
+        if depth > 0 && self.composite_output.is_none() {
+            self.composite_output = Some(create_surface(
+                device,
+                renderer,
+                self.width,
+                self.height,
+                self.format,
+            ));
         }
     }
 
@@ -461,6 +472,7 @@ impl WgpuModelResources {
                         )?);
                         index += 1;
                     }
+                    state.flush(&mut pass, frame.meshes);
                     continue;
                 }
                 self.ensure_layer(device, renderer, depth + 1);
@@ -471,9 +483,10 @@ impl WgpuModelResources {
                         &self.layers[depth + 1].color.view,
                         wgpu::LoadOp::Load,
                     );
+                    let mut state = WgpuDrawState::default();
                     stats.drawable_draws += u32::from(renderer.draw_model_drawable(
                         &mut pass,
-                        &mut WgpuDrawState::default(),
+                        &mut state,
                         frame.meshes,
                         i,
                         frame.textures,
@@ -482,6 +495,7 @@ impl WgpuModelResources {
                         frame.transform,
                         crate::moc3::Moc3DrawableBlendMode::Normal,
                     )?);
+                    state.flush(&mut pass, frame.meshes);
                 }
                 self.composite(
                     encoder,
@@ -547,6 +561,7 @@ impl WgpuModelResources {
         pass.set_pipeline(renderer.draw_mask_pipeline(frame.meshes.material_buffer().is_some()));
         pass.set_bind_group(1, frame.transform.bind_group(), &[]);
         pass.set_bind_group(2, self.mask_params.bind_group(), &[]);
+        let mut state = WgpuDrawState::default();
         for &raw in masks {
             let index = usize::try_from(raw).map_err(|_| WgpuModelRenderError::InvalidPlan)?;
             let d = frame
@@ -557,52 +572,39 @@ impl WgpuModelResources {
             if !d.info().is_enabled() || d.is_empty() {
                 continue;
             }
-            let t = usize::try_from(d.texture_index())
-                .ok()
-                .and_then(|i| frame.textures.get(i))
-                .ok_or(WgpuRenderError::MissingTexture {
-                    texture_index: d.texture_index(),
-                })?;
-            pass.set_bind_group(0, t.bind_group(), &[]);
-            if let Some((v, i)) = frame.meshes.packed_buffers() {
-                pass.set_vertex_buffer(0, v.slice(..));
-                pass.set_index_buffer(i.slice(..), wgpu::IndexFormat::Uint16);
-                pass.set_vertex_buffer(1, frame.meshes.material_buffer().unwrap().slice(..));
-            } else {
-                pass.set_vertex_buffer(0, d.vertex_buffer_slice());
-                pass.set_index_buffer(d.index_buffer_slice(), wgpu::IndexFormat::Uint16);
-            }
-            pass.draw_indexed(
-                d.draw_index_range(),
-                d.base_vertex(),
-                frame.meshes.instance_range(index),
-            );
+            state.push_mask(&mut pass, frame.meshes, index, d, |texture_index| {
+                usize::try_from(texture_index)
+                    .ok()
+                    .and_then(|i| frame.textures.get(i))
+                    .map(WgpuTexture::bind_group)
+                    .ok_or(WgpuRenderError::MissingTexture { texture_index })
+            })?;
         }
+        state.flush(&mut pass, frame.meshes);
         Ok(())
     }
 
     fn composite(
-        &self,
+        &mut self,
         encoder: &mut wgpu::CommandEncoder,
         uniforms: &Uniforms,
         depth: usize,
         offset: u32,
     ) {
-        let parent = &self.layers[depth];
-        let child = &self.layers[depth + 1];
-        encoder.copy_texture_to_texture(
-            parent.color.texture.as_image_copy(),
-            parent.backdrop.texture.as_image_copy(),
-            wgpu::Extent3d {
-                width: self.width,
-                height: self.height,
-                depth_or_array_layers: 1,
-            },
+        // The full-screen composite reads the parent in place and writes every
+        // pixel to the shared spare surface. Swap them for the next pass.
+        let output = self.composite_output.as_mut().unwrap();
+        let (ancestors, descendants) = self.layers.split_at_mut(depth + 1);
+        let parent = &mut ancestors[depth];
+        let child = &descendants[0];
+        let mut pass = begin_pass(
+            encoder,
+            &output.view,
+            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
         );
-        let mut pass = begin_pass(encoder, &parent.color.view, wgpu::LoadOp::Load);
         pass.set_pipeline(&self.composite_pipeline);
         pass.set_bind_group(0, &child.color.bind_group, &[]);
-        pass.set_bind_group(1, &parent.backdrop.bind_group, &[]);
+        pass.set_bind_group(1, &parent.color.bind_group, &[]);
         pass.set_bind_group(
             2,
             &child
@@ -614,6 +616,8 @@ impl WgpuModelResources {
         );
         pass.set_bind_group(3, &uniforms.bind_group, &[offset]);
         pass.draw(0..3, 0..1);
+        drop(pass);
+        std::mem::swap(&mut parent.color, output);
     }
 }
 
@@ -635,19 +639,12 @@ fn create_surface(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-            | wgpu::TextureUsages::TEXTURE_BINDING
-            | wgpu::TextureUsages::COPY_SRC
-            | wgpu::TextureUsages::COPY_DST,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
         view_formats: &[],
     });
     let view = texture.create_view(&Default::default());
     let bind_group = renderer.create_texture_bind_group(device, &view);
-    Surface {
-        texture,
-        view,
-        bind_group,
-    }
+    Surface { view, bind_group }
 }
 
 fn begin_pass<'a>(

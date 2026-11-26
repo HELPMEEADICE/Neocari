@@ -42,18 +42,11 @@ impl DrawableInfo {
     }
 
     #[cfg(feature = "wgpu")]
-    pub(crate) fn update_from_mesh(&mut self, mesh: &Moc3DrawableMesh, update_bounds: bool) {
+    pub(crate) fn update_dynamic_fields(&mut self, mesh: &Moc3DrawableMesh, update_bounds: bool) {
         self.enabled = mesh.is_enabled();
-        self.texture_index = mesh.texture_index();
-        self.blend_mode = mesh.blend_mode();
         self.opacity = mesh.opacity();
         self.draw_order = mesh.draw_order();
         self.render_order = mesh.render_order();
-        if self.masks.as_ref() != mesh.masks() {
-            self.masks = Arc::<[i32]>::from(mesh.masks());
-            self.mask_key = sorted_mask_key(&self.masks);
-        }
-        self.inverted_mask = mesh.is_inverted_mask();
         if update_bounds {
             self.bounds = drawable_vertex_bounds(mesh.vertices());
         }
@@ -152,10 +145,12 @@ pub(crate) fn draw_order_indices_from_into(
     seen.clear();
     seen.resize(count, false);
     if render_orders_are_total_rank_from(count, &mut render_order, seen) {
-        indices.sort_by_key(|&index| render_order(index));
+        for index in 0..count {
+            indices[render_order(index) as usize] = index;
+        }
         return;
     }
-    indices.sort_by(|left, right| {
+    indices.sort_unstable_by(|left, right| {
         draw_order_from_raw(draw_order(*left))
             .cmp(&draw_order_from_raw(draw_order(*right)))
             .then_with(|| render_order(*left).cmp(&render_order(*right)))

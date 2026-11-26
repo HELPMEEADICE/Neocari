@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::core::draw_order_from_raw;
 
 use super::{Moc3ArtMeshKeyforms, Moc3ArtMeshes};
@@ -58,7 +60,7 @@ pub struct Moc3DrawableMesh {
     multiply_color: [f32; 3],
     screen_color: [f32; 3],
     vertices: Vec<Moc3DrawableVertex>,
-    indices: Vec<u16>,
+    indices: Arc<[u16]>,
     masks: Vec<i32>,
 }
 
@@ -162,7 +164,7 @@ impl Moc3DrawableMesh {
             multiply_color: [1.0, 1.0, 1.0],
             screen_color: [0.0, 0.0, 0.0],
             vertices,
-            indices,
+            indices: indices.into(),
             masks: renderable_masks(&masks, usize::MAX),
         }
     }
@@ -258,6 +260,11 @@ impl Moc3DrawableMesh {
 
     /// Returns triangle indices into [`vertices`](Self::vertices).
     pub fn indices(&self) -> &[u16] {
+        &self.indices
+    }
+
+    #[cfg(feature = "wgpu")]
+    pub(crate) fn shared_indices(&self) -> &Arc<[u16]> {
         &self.indices
     }
 

@@ -75,6 +75,17 @@ pub struct DecodedTexture {
 }
 
 impl DecodedTexture {
+    /// Loads a single texture file into tightly packed RGBA8 pixels.
+    pub fn load(path: impl AsRef<Path>) -> Result<Self, AssetLoadError> {
+        let path = path.as_ref();
+        let image = image::open(path).map_err(|source| AssetLoadError::Image {
+            path: path.display().to_string(),
+            source,
+        })?;
+        let rgba = image.into_rgba8();
+        Ok(Self::new(rgba.width(), rgba.height(), rgba.into_raw()))
+    }
+
     /// Creates a decoded texture from raw RGBA8 data.
     ///
     /// The constructor does not validate that `rgba.len() == width * height * 4`;
@@ -381,7 +392,22 @@ fn read_moc2_settings(path: &Path) -> Result<Moc2Settings, AssetLoadError> {
 /// The generated drawables use the model default parameter values and can be
 /// uploaded through the existing wgpu renderer.
 pub fn load_moc2_model(path: impl AsRef<Path>) -> Result<LoadedMoc2Model, AssetLoadError> {
-    let path = path.as_ref();
+    load_moc2_model_impl(path.as_ref(), true)
+}
+
+/// Loads Cubism 2 default-pose drawables without decoding their textures.
+/// Resolve [`Moc2Settings::texture_files`] relative to the model directory and
+/// use [`DecodedTexture::load`] to decode and upload one texture at a time.
+pub fn load_moc2_model_without_textures(
+    path: impl AsRef<Path>,
+) -> Result<LoadedMoc2Model, AssetLoadError> {
+    load_moc2_model_impl(path.as_ref(), false)
+}
+
+fn load_moc2_model_impl(
+    path: &Path,
+    decode_model_textures: bool,
+) -> Result<LoadedMoc2Model, AssetLoadError> {
     let model_dir = path.parent().ok_or_else(|| AssetLoadError::MissingParent {
         path: path.display().to_string(),
     })?;
@@ -393,7 +419,12 @@ pub fn load_moc2_model(path: impl AsRef<Path>) -> Result<LoadedMoc2Model, AssetL
         })?;
     let moc_bytes = read_bytes(&model_dir.join(model_file.replace('\\', "/")))?;
     let model = Moc2Model::from_bytes(&moc_bytes).map_err(AssetLoadError::Moc2)?;
-    let textures = decode_textures(model_dir, settings.texture_files())?;
+    drop(moc_bytes);
+    let textures = if decode_model_textures {
+        decode_textures(model_dir, settings.texture_files())?
+    } else {
+        Vec::new()
+    };
     Ok(LoadedMoc2Model {
         model,
         settings,
@@ -409,7 +440,22 @@ pub fn load_moc2_model(path: impl AsRef<Path>) -> Result<LoadedMoc2Model, AssetL
 /// animation base. Motions and expressions are loaded lazily by
 /// [`Moc2RuntimeModel::play_motion`] and [`Moc2RuntimeModel::play_expression`].
 pub fn load_moc2_runtime(path: impl AsRef<Path>) -> Result<Moc2RuntimeModel, AssetLoadError> {
-    let path = path.as_ref();
+    load_moc2_runtime_impl(path.as_ref(), true)
+}
+
+/// Loads a Cubism 2 animation runtime without decoding its textures.
+/// Resolve [`Moc2Settings::texture_files`] relative to the model directory and
+/// use [`DecodedTexture::load`] to decode and upload one texture at a time.
+pub fn load_moc2_runtime_without_textures(
+    path: impl AsRef<Path>,
+) -> Result<Moc2RuntimeModel, AssetLoadError> {
+    load_moc2_runtime_impl(path.as_ref(), false)
+}
+
+fn load_moc2_runtime_impl(
+    path: &Path,
+    decode_model_textures: bool,
+) -> Result<Moc2RuntimeModel, AssetLoadError> {
     let model_dir = path.parent().ok_or_else(|| AssetLoadError::MissingParent {
         path: path.display().to_string(),
     })?;
@@ -421,6 +467,7 @@ pub fn load_moc2_runtime(path: impl AsRef<Path>) -> Result<Moc2RuntimeModel, Ass
         })?;
     let moc_bytes = read_bytes(&model_dir.join(model_file.replace('\\', "/")))?;
     let model = Moc2Model::from_bytes(&moc_bytes).map_err(AssetLoadError::Moc2)?;
+    drop(moc_bytes);
 
     let mut runtime = Moc2Runtime::new(model.into_scene()).ok_or(AssetLoadError::DrawableMeshes)?;
 
@@ -453,7 +500,11 @@ pub fn load_moc2_runtime(path: impl AsRef<Path>) -> Result<Moc2RuntimeModel, Ass
     runtime.set_layout(settings.layout().clone());
     runtime.save_parameters();
 
-    let textures = decode_textures(model_dir, settings.texture_files())?;
+    let textures = if decode_model_textures {
+        decode_textures(model_dir, settings.texture_files())?
+    } else {
+        Vec::new()
+    };
 
     Ok(Moc2RuntimeModel {
         runtime,
@@ -471,7 +522,7 @@ pub fn load_moc2_runtime(path: impl AsRef<Path>) -> Result<Moc2RuntimeModel, Ass
 /// `.moc3` file and textures from the same model directory, then builds drawable
 /// meshes using the model's default parameter values.
 pub fn load_model(path: impl AsRef<Path>) -> Result<DefaultModel, AssetLoadError> {
-    parse_model(path)?.into_default_model()
+    parse_model(path.as_ref(), true)?.into_default_model()
 }
 
 /// Loads a model into a mutable runtime.
@@ -481,9 +532,24 @@ pub fn load_model(path: impl AsRef<Path>) -> Result<DefaultModel, AssetLoadError
 /// loop can update parameters, apply motions and expressions, call
 /// [`ModelRuntime::update_meshes`], and draw the resulting meshes.
 pub fn load_model_runtime(path: impl AsRef<Path>) -> Result<RuntimeModel, AssetLoadError> {
-    let path = path.as_ref();
-    let model_dir = path.parent().map(Path::to_path_buf);
-    parse_model(path)?.into_runtime_model(model_dir)
+    load_model_runtime_impl(path.as_ref(), true)
+}
+
+/// Loads a model runtime without decoding its textures.
+/// Resolve [`Model3::textures`] relative to the model directory and use
+/// [`DecodedTexture::load`] to decode and upload one texture at a time.
+pub fn load_model_runtime_without_textures(
+    path: impl AsRef<Path>,
+) -> Result<RuntimeModel, AssetLoadError> {
+    load_model_runtime_impl(path.as_ref(), false)
+}
+
+fn load_model_runtime_impl(
+    path: &Path,
+    decode_model_textures: bool,
+) -> Result<RuntimeModel, AssetLoadError> {
+    parse_model(path, decode_model_textures)?
+        .into_runtime_model(path.parent().map(Path::to_path_buf))
 }
 
 #[derive(Debug, Clone)]
@@ -606,8 +672,7 @@ impl ParsedModel {
     }
 }
 
-fn parse_model(path: impl AsRef<Path>) -> Result<ParsedModel, AssetLoadError> {
-    let path = path.as_ref();
+fn parse_model(path: &Path, decode_model_textures: bool) -> Result<ParsedModel, AssetLoadError> {
     let model_source = read_text(path)?;
     let model = Model3::from_json_str(&model_source).map_err(AssetLoadError::Json)?;
     let model_dir = path.parent().ok_or_else(|| AssetLoadError::MissingParent {
@@ -645,7 +710,11 @@ fn parse_model(path: impl AsRef<Path>) -> Result<ParsedModel, AssetLoadError> {
         }
         None => None,
     };
-    let textures = decode_textures(model_dir, model.textures())?;
+    let textures = if decode_model_textures {
+        decode_textures(model_dir, model.textures())?
+    } else {
+        Vec::new()
+    };
 
     Ok(ParsedModel {
         model,
@@ -688,13 +757,13 @@ fn decode_textures(
         .map(|texture| model_dir.join(texture))
         .collect::<Vec<_>>();
     if paths.len() <= 1 {
-        return paths.into_iter().map(decode_texture).collect();
+        return paths.into_iter().map(DecodedTexture::load).collect();
     }
 
     thread::scope(|scope| {
         let handles = paths
             .iter()
-            .map(|path| scope.spawn(move || decode_texture(path)))
+            .map(|path| scope.spawn(move || DecodedTexture::load(path)))
             .collect::<Vec<_>>();
 
         handles
@@ -702,18 +771,4 @@ fn decode_textures(
             .map(|handle| handle.join().expect("texture decode thread panicked"))
             .collect()
     })
-}
-
-fn decode_texture(path: impl AsRef<Path>) -> Result<DecodedTexture, AssetLoadError> {
-    let path = path.as_ref();
-    let image = image::open(path).map_err(|source| AssetLoadError::Image {
-        path: path.display().to_string(),
-        source,
-    })?;
-    let rgba = image.into_rgba8();
-    Ok(DecodedTexture::new(
-        rgba.width(),
-        rgba.height(),
-        rgba.into_raw(),
-    ))
 }

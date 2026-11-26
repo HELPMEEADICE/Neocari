@@ -3,7 +3,7 @@ use std::{collections::BTreeMap, error::Error, fmt, path::PathBuf, sync::Arc, ti
 use ab_glyph::{Font, FontArc, Glyph, ScaleFont, point};
 use neocari::{
     ExpressionManager, ModelRuntime, MotionPlayer,
-    assets::{DecodedTexture, load_model_runtime},
+    assets::{DecodedTexture, load_model_runtime_without_textures},
     core::Matrix44,
     expression::load_expression,
     moc3::{Moc3DrawableMesh, Moc3DrawableVertex, Moc3RenderPlan},
@@ -1088,11 +1088,28 @@ fn load_rendered_model(
     surface_size: PhysicalSize<u32>,
     model_scale: f32,
 ) -> Result<LoadedModel, Box<dyn Error>> {
-    let loaded = load_model_runtime(spec.path)?;
+    let loaded = load_model_runtime_without_textures(spec.path)?;
     let runtime = loaded.runtime();
     let model_bounds = ModelBounds::from_drawables(runtime.meshes())
         .ok_or(ExampleError("model has no drawable bounds"))?;
-    let textures = create_textures(renderer, device, queue, loaded.textures())?;
+    let model_dir = loaded
+        .model_dir()
+        .ok_or(ExampleError("missing model directory"))?;
+    let textures = runtime
+        .model()
+        .textures()
+        .iter()
+        .map(|path| {
+            let texture = DecodedTexture::load(model_dir.join(path))?;
+            Ok(renderer.create_rgba8_texture(
+                device,
+                queue,
+                texture.width(),
+                texture.height(),
+                texture.rgba(),
+            )?)
+        })
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
     let motion_groups = motion_paths_by_group(runtime, loaded.model_dir());
     let motions = motion_groups.values().flatten().cloned().collect();
     let expressions = expression_paths(runtime, loaded.model_dir());
@@ -1463,28 +1480,6 @@ fn rasterize_text(font: &FontArc, text: &str) -> (u32, u32, Vec<u8>) {
     (width, height, rgba)
 }
 
-fn create_textures(
-    renderer: &WgpuLive2dRenderer,
-    device: &wgpu::Device,
-    queue: &wgpu::Queue,
-    textures: &[DecodedTexture],
-) -> Result<Vec<WgpuTexture>, Box<dyn Error>> {
-    textures
-        .iter()
-        .map(|texture| {
-            renderer
-                .create_rgba8_texture(
-                    device,
-                    queue,
-                    texture.width(),
-                    texture.height(),
-                    texture.rgba(),
-                )
-                .map_err(|error| Box::new(error) as Box<dyn Error>)
-        })
-        .collect()
-}
-
 #[derive(Debug, Copy, Clone, PartialEq)]
 struct ButtonRect {
     x: f64,
@@ -1757,6 +1752,7 @@ impl Error for ExampleError {}
 #[cfg(test)]
 mod tests {
     use super::*;
+    use neocari::assets::load_model_runtime;
 
     #[test]
     fn fit_model_matrix_centers_and_fits_square_surface() {

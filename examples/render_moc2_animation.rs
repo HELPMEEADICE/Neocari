@@ -8,7 +8,7 @@
 use std::{error::Error, path::PathBuf, sync::mpsc, time::Duration};
 
 use neocari::{
-    assets::load_moc2_runtime,
+    assets::{DecodedTexture, load_moc2_runtime_without_textures},
     core::Matrix44,
     render::wgpu::{WgpuClippingPlan, WgpuLive2dRenderer, WgpuMaskRenderTarget, WgpuMeshBuffers},
 };
@@ -146,7 +146,7 @@ fn output_path(options: &Options, frame: u32) -> PathBuf {
 
 async fn render(options: Options) -> Result<(), Box<dyn Error>> {
     eprintln!("loading Cubism V2 model");
-    let mut model = load_moc2_runtime(&options.model)?;
+    let mut model = load_moc2_runtime_without_textures(&options.model)?;
     model.runtime_mut().set_auto_blink(options.auto_behaviours);
     model.runtime_mut().set_auto_breath(options.auto_behaviours);
     if let Some((x, y)) = options.drag {
@@ -168,7 +168,7 @@ async fn render(options: Options) -> Result<(), Box<dyn Error>> {
     eprintln!(
         "loaded {} drawables, {} textures, canvas {}x{}",
         model.meshes().len(),
-        model.textures().len(),
+        model.settings().texture_files().len(),
         model.runtime().canvas().width(),
         model.runtime().canvas().height()
     );
@@ -196,19 +196,22 @@ async fn render(options: Options) -> Result<(), Box<dyn Error>> {
         .await?;
 
     let renderer = WgpuLive2dRenderer::new(&device, format);
+    let model_dir = model.model_dir().ok_or("missing model directory")?;
     let textures = model
-        .take_textures()
-        .into_iter()
-        .map(|texture| {
-            renderer.create_rgba8_texture(
+        .settings()
+        .texture_files()
+        .iter()
+        .map(|path| {
+            let texture = DecodedTexture::load(model_dir.join(path))?;
+            Ok(renderer.create_rgba8_texture(
                 &device,
                 &queue,
                 texture.width(),
                 texture.height(),
                 texture.rgba(),
-            )
+            )?)
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
     let mut mesh_buffers =
         WgpuMeshBuffers::from_drawables(&device, model.meshes()).ok_or("mesh buffers")?;
 

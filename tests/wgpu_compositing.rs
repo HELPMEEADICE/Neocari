@@ -59,6 +59,7 @@ fn render(
         [255, 0, 0, 255],
         [255, 255, 255, 255],
         [204, 204, 204, 255],
+        [255, 255, 255, 96],
     ]
     .map(|rgba| {
         renderer
@@ -285,6 +286,30 @@ fn cases(device: &wgpu::Device, queue: &wgpu::Queue, read: bool) {
         assert_eq!(stats.allocated_layers, 3);
         assert_eq!(stats.allocated_mask_layers, 1);
     }
+    // The inner group uses two overlapping masks. Its parent must clear the
+    // shared surface before drawing a different mask and inverting its coverage.
+    let mut meshes = meshes.to_vec();
+    meshes.push(quad(4, 0.0, 0.5));
+    plan.offscreens = vec![
+        group(vec![Node::Offscreen(1)], 1.0),
+        group(vec![Node::Drawable(2)], 1.0),
+    ];
+    plan.offscreens[0].masks = vec![5];
+    plan.offscreens[0].inverted_mask = true;
+    plan.offscreens[1].masks = vec![3, 5];
+    let (pixels, stats) = render(
+        device,
+        queue,
+        &renderer,
+        &mut resources,
+        &meshes,
+        &plan,
+        read,
+    );
+    assert_pixel(&pixels, 1, [159.0 / 255.0; 4]);
+    assert_pixel(&pixels, 4, [60.0 / 255.0; 4]);
+    assert_pixel(&pixels, 7, [0.0; 4]);
+    assert_eq!(stats.allocated_mask_layers, 1);
 }
 
 #[test]

@@ -1,7 +1,7 @@
 use std::{error::Error, path::PathBuf, sync::mpsc, time::Duration};
 
 use neocari::{
-    assets::load_moc2_model,
+    assets::{DecodedTexture, load_moc2_model_without_textures},
     core::Matrix44,
     render::wgpu::{WgpuClippingPlan, WgpuLive2dRenderer, WgpuMaskRenderTarget, WgpuMeshBuffers},
 };
@@ -25,11 +25,11 @@ async fn render() -> Result<(), Box<dyn Error>> {
         .unwrap_or_else(|| PathBuf::from("moc2-render.png"));
 
     eprintln!("loading V2 model");
-    let model = load_moc2_model(&model_path)?;
+    let model = load_moc2_model_without_textures(&model_path)?;
     eprintln!(
         "loaded {} drawables, {} textures",
         model.drawables().len(),
-        model.textures().len()
+        model.settings().texture_files().len()
     );
     let drawables = model.drawables();
     let mut bounds = [
@@ -78,19 +78,22 @@ async fn render() -> Result<(), Box<dyn Error>> {
     eprintln!("device ready");
     let format = wgpu::TextureFormat::Rgba8Unorm;
     let renderer = WgpuLive2dRenderer::new(&device, format);
+    let model_dir = model.model_dir().ok_or("missing model directory")?;
     let textures = model
-        .textures()
+        .settings()
+        .texture_files()
         .iter()
-        .map(|texture| {
-            renderer.create_rgba8_texture(
+        .map(|path| {
+            let texture = DecodedTexture::load(model_dir.join(path))?;
+            Ok(renderer.create_rgba8_texture(
                 &device,
                 &queue,
                 texture.width(),
                 texture.height(),
                 texture.rgba(),
-            )
+            )?)
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .collect::<Result<Vec<_>, Box<dyn Error>>>()?;
     eprintln!("textures uploaded");
     let mesh_buffers = WgpuMeshBuffers::from_static_drawables(&device, drawables)
         .ok_or("failed to create GPU mesh buffers")?;

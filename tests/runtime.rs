@@ -1,5 +1,5 @@
 use neocari::{
-    assets::{load_model, load_model_runtime},
+    assets::{DecodedTexture, load_model, load_model_runtime, load_model_runtime_without_textures},
     expression::{ExpressionManager, ExpressionPlayer, load_expression},
     json::{Expression3, Motion3},
     motion::MotionPlayer,
@@ -23,14 +23,30 @@ fn runtime_default_pose_matches_default_model() {
 
 #[test]
 fn loaded_textures_match_image_crate_rgba_output() {
-    let model = load_model_runtime("assets/models/Hiyori/Hiyori.model3.json").unwrap();
+    let path = "assets/models/Hiyori/Hiyori.model3.json";
+    let model = load_model_runtime(path).unwrap();
+    let streamed = load_model_runtime_without_textures(path).unwrap();
+    assert!(streamed.textures().is_empty());
+    assert_eq!(streamed.runtime().meshes(), model.runtime().meshes());
+    let streamed_paths = streamed.runtime().model().textures();
+    let model_dir = streamed.model_dir().unwrap();
     let texture_paths = [
         "assets/models/Hiyori/Hiyori.2048/texture_00.png",
         "assets/models/Hiyori/Hiyori.2048/texture_01.png",
     ];
 
     assert_eq!(model.textures().len(), texture_paths.len());
-    for (texture, path) in model.textures().iter().zip(texture_paths) {
+    assert_eq!(model.textures().len(), streamed_paths.len());
+    for ((texture, path), streamed_path) in model
+        .textures()
+        .iter()
+        .zip(texture_paths)
+        .zip(streamed_paths)
+    {
+        assert_eq!(
+            *texture,
+            DecodedTexture::load(model_dir.join(streamed_path)).unwrap()
+        );
         let expected = image::open(path).unwrap().to_rgba8();
 
         assert_eq!(texture.width(), expected.width());

@@ -65,6 +65,18 @@ pub(super) struct PipelineResources {
 }
 
 impl PipelineResources {
+    fn create_mask(&self, format: wgpu::TextureFormat, packed: bool) -> wgpu::RenderPipeline {
+        create_textured_triangle_pipeline(
+            &self.device,
+            &self.mask_pipeline_layout,
+            &self.mask_shader,
+            format,
+            wgpu_mask_blend_state(),
+            "live2d.mask.pipeline",
+            packed,
+        )
+    }
+
     fn create(&self, packed: bool) -> Pipelines {
         let modes = [
             Moc3DrawableBlendMode::Normal,
@@ -92,15 +104,7 @@ impl PipelineResources {
         Pipelines {
             unmasked: pipelines(&self.pipeline_layout, &self.shader),
             masked: pipelines(&self.masked_pipeline_layout, &self.masked_shader),
-            mask: create_textured_triangle_pipeline(
-                &self.device,
-                &self.mask_pipeline_layout,
-                &self.mask_shader,
-                wgpu::TextureFormat::Rgba8Unorm,
-                wgpu_mask_blend_state(),
-                "live2d.mask.pipeline",
-                packed,
-            ),
+            mask: self.create_mask(wgpu::TextureFormat::Rgba8Unorm, packed),
         }
     }
 }
@@ -320,6 +324,7 @@ impl WgpuLive2dRenderer {
             pipeline_resources,
             legacy_pipelines: std::sync::OnceLock::new(),
             packed_pipelines,
+            group_mask_pipelines: Default::default(),
             texture_bind_group_layout,
             transform_bind_group_layout,
             mask_params_bind_group_layout,
@@ -383,6 +388,13 @@ impl WgpuLive2dRenderer {
         } else {
             &self.legacy_pipelines().mask
         }
+    }
+
+    pub(super) fn group_mask_pipeline(&self, packed: bool) -> &wgpu::RenderPipeline {
+        self.group_mask_pipelines[usize::from(packed)].get_or_init(|| {
+            self.pipeline_resources
+                .create_mask(wgpu::TextureFormat::R8Unorm, packed)
+        })
     }
 
     pub fn masked_pipeline_for_blend_mode(

@@ -46,6 +46,7 @@ pub struct WgpuModelRenderStats {
     pub drawable_draws: u32,
     pub composite_draws: u32,
     pub allocated_layers: usize,
+    /// Number of offscreen group mask surfaces retained by the renderer (zero or one).
     pub allocated_mask_layers: usize,
 }
 
@@ -53,11 +54,6 @@ pub struct WgpuModelRenderStats {
 struct Surface {
     view: wgpu::TextureView,
     bind_group: wgpu::BindGroup,
-}
-#[derive(Debug)]
-struct Layer {
-    color: Surface,
-    mask: Option<Surface>,
 }
 #[derive(Debug, Clone)]
 struct Uniforms {
@@ -67,15 +63,16 @@ struct Uniforms {
     identity: u32,
 }
 
-/// Reusable layers are allocated by nesting depth, not by group count.
-/// Resizing drops the old pool. A frame uploads one aligned uniform batch.
+/// Color surfaces are allocated by nesting depth. Offscreen groups share a mask.
+/// Resizing drops the old surfaces. A frame uploads one aligned uniform batch.
 #[derive(Debug)]
 pub struct WgpuModelResources {
     format: wgpu::TextureFormat,
     width: u32,
     height: u32,
-    layers: Vec<Layer>,
+    layers: Vec<Surface>,
     composite_output: Option<Surface>,
+    group_mask: Option<Surface>,
     uniform_layout: wgpu::BindGroupLayout,
     composite_pipeline: wgpu::RenderPipeline,
     present_pipeline: wgpu::RenderPipeline,
@@ -149,11 +146,12 @@ impl WgpuLive2dRenderer {
             height: 0,
             layers: Vec::new(),
             composite_output: None,
+            group_mask: None,
             uniforms: None,
             uniform_bytes: Vec::new(),
             cached_uniform_bytes: Vec::new(),
             advanced_blends: Vec::new(),
-            fallback_mask: create_surface(device, self, 1, 1, wgpu::TextureFormat::Rgba8Unorm),
+            fallback_mask: create_surface(device, self, 1, 1, wgpu::TextureFormat::R8Unorm),
             uniform_layout,
             composite_pipeline: pipeline("fs_composite", None),
             present_pipeline: pipeline(
@@ -197,6 +195,7 @@ impl WgpuLive2dRenderer {
         if resources.width != target.width || resources.height != target.height {
             resources.layers.clear();
             resources.composite_output = None;
+            resources.group_mask = None;
             resources.width = target.width;
             resources.height = target.height;
         }
@@ -241,13 +240,12 @@ impl WgpuLive2dRenderer {
             }
             state.flush(&mut pass, frame.meshes);
             stats.allocated_layers = resources.layers.len();
-            stats.allocated_mask_layers =
-                resources.layers.iter().filter(|l| l.mask.is_some()).count();
+            stats.allocated_mask_layers = usize::from(resources.group_mask.is_some());
             return Ok(stats);
         }
         resources.ensure_layer(device, self, 0);
         let uniforms = resources.uniforms(device, encoder, frame.plan)?;
-        clear(encoder, &resources.layers[0].color.view);
+        clear(encoder, &resources.layers[0].view);
         let mut stats = WgpuModelRenderStats::default();
         resources.render_nodes(
             device,
@@ -263,14 +261,14 @@ impl WgpuLive2dRenderer {
             let mut pass = begin_pass(encoder, target.view, target.load);
             pass.set_pipeline(&resources.present_pipeline);
             let layer = &resources.layers[0];
-            pass.set_bind_group(0, &layer.color.bind_group, &[]);
+            pass.set_bind_group(0, &layer.bind_group, &[]);
             pass.set_bind_group(1, &resources.fallback_mask.bind_group, &[]);
             pass.set_bind_group(2, &resources.fallback_mask.bind_group, &[]);
             pass.set_bind_group(3, &uniforms.bind_group, &[uniforms.identity]);
             pass.draw(0..3, 0..1);
         }
         stats.allocated_layers = resources.layers.len();
-        stats.allocated_mask_layers = resources.layers.iter().filter(|l| l.mask.is_some()).count();
+        stats.allocated_mask_layers = usize::from(resources.group_mask.is_some());
         Ok(stats)
     }
 }
@@ -278,10 +276,13 @@ impl WgpuLive2dRenderer {
 impl WgpuModelResources {
     fn ensure_layer(&mut self, device: &wgpu::Device, renderer: &WgpuLive2dRenderer, depth: usize) {
         while self.layers.len() <= depth {
-            self.layers.push(Layer {
-                color: create_surface(device, renderer, self.width, self.height, self.format),
-                mask: None,
-            });
+            self.layers.push(create_surface(
+                device,
+                renderer,
+                self.width,
+                self.height,
+                self.format,
+            ));
         }
         if depth > 0 && self.composite_output.is_none() {
             self.composite_output = Some(create_surface(
@@ -456,7 +457,7 @@ impl WgpuModelResources {
                     .ok_or(WgpuModelRenderError::InvalidPlan)?;
                 if !blend.is_advanced() {
                     let mut pass =
-                        begin_pass(encoder, &self.layers[depth].color.view, wgpu::LoadOp::Load);
+                        begin_pass(encoder, &self.layers[depth].view, wgpu::LoadOp::Load);
                     let mut state = WgpuDrawState::default();
                     while let Some(Moc3RenderNode::Drawable(i)) = nodes.get(index) {
                         if frame
@@ -486,13 +487,10 @@ impl WgpuModelResources {
                     continue;
                 }
                 self.ensure_layer(device, renderer, depth + 1);
-                clear(encoder, &self.layers[depth + 1].color.view);
+                clear(encoder, &self.layers[depth + 1].view);
                 {
-                    let mut pass = begin_pass(
-                        encoder,
-                        &self.layers[depth + 1].color.view,
-                        wgpu::LoadOp::Load,
-                    );
+                    let mut pass =
+                        begin_pass(encoder, &self.layers[depth + 1].view, wgpu::LoadOp::Load);
                     let mut state = WgpuDrawState::default();
                     stats.drawable_draws += u32::from(renderer.draw_model_drawable(
                         &mut pass,
@@ -517,6 +515,7 @@ impl WgpuModelResources {
                     uniforms,
                     depth,
                     (frame.plan.offscreens.len() + slot) as u32 * uniforms.stride,
+                    false,
                 );
                 stats.composite_draws += 1;
             } else if let Moc3RenderNode::Offscreen(i) = nodes[index] {
@@ -527,7 +526,7 @@ impl WgpuModelResources {
                     .ok_or(WgpuModelRenderError::InvalidPlan)?;
                 if group.enabled && group.opacity > 0.0 {
                     self.ensure_layer(device, renderer, depth + 1);
-                    clear(encoder, &self.layers[depth + 1].color.view);
+                    clear(encoder, &self.layers[depth + 1].view);
                     self.render_nodes(
                         device,
                         renderer,
@@ -538,10 +537,13 @@ impl WgpuModelResources {
                         depth + 1,
                         stats,
                     )?;
-                    if !group.masks.is_empty() {
-                        self.group_mask(device, renderer, encoder, frame, &group.masks, depth + 1)?;
+                    // The descendants have consumed their masks. Render this
+                    // group's mask into the same surface just before sampling it.
+                    let masked = !group.masks.is_empty();
+                    if masked {
+                        self.render_group_mask(device, renderer, encoder, frame, &group.masks)?;
                     }
-                    self.composite(encoder, uniforms, depth, i as u32 * uniforms.stride);
+                    self.composite(encoder, uniforms, depth, i as u32 * uniforms.stride, masked);
                     stats.composite_draws += 1;
                 }
             }
@@ -550,22 +552,22 @@ impl WgpuModelResources {
         Ok(())
     }
 
-    fn group_mask(
+    fn render_group_mask(
         &mut self,
         device: &wgpu::Device,
         renderer: &WgpuLive2dRenderer,
         encoder: &mut wgpu::CommandEncoder,
         frame: WgpuModelFrame<'_>,
         masks: &[i32],
-        depth: usize,
     ) -> Result<(), WgpuModelRenderError> {
-        let mask = self.layers[depth].mask.get_or_insert_with(|| {
+        // The composite shader samples red at full target resolution.
+        let mask = self.group_mask.get_or_insert_with(|| {
             create_surface(
                 device,
                 renderer,
                 self.width,
                 self.height,
-                wgpu::TextureFormat::Rgba8Unorm,
+                wgpu::TextureFormat::R8Unorm,
             )
         });
         let mut pass = begin_pass(
@@ -573,7 +575,7 @@ impl WgpuModelResources {
             &mask.view,
             wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
         );
-        pass.set_pipeline(renderer.draw_mask_pipeline(frame.meshes.material_buffer().is_some()));
+        pass.set_pipeline(renderer.group_mask_pipeline(frame.meshes.material_buffer().is_some()));
         pass.set_bind_group(1, frame.transform.bind_group(), &[]);
         pass.set_bind_group(2, self.mask_params.bind_group(), &[]);
         let mut state = WgpuDrawState::default();
@@ -605,6 +607,7 @@ impl WgpuModelResources {
         uniforms: &Uniforms,
         depth: usize,
         offset: u32,
+        masked: bool,
     ) {
         // The full-screen composite reads the parent in place and writes every
         // pixel to the shared spare surface. Swap them for the next pass.
@@ -618,21 +621,18 @@ impl WgpuModelResources {
             wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
         );
         pass.set_pipeline(&self.composite_pipeline);
-        pass.set_bind_group(0, &child.color.bind_group, &[]);
-        pass.set_bind_group(1, &parent.color.bind_group, &[]);
-        pass.set_bind_group(
-            2,
-            &child
-                .mask
-                .as_ref()
-                .unwrap_or(&self.fallback_mask)
-                .bind_group,
-            &[],
-        );
+        pass.set_bind_group(0, &child.bind_group, &[]);
+        pass.set_bind_group(1, &parent.bind_group, &[]);
+        let mask = if masked {
+            self.group_mask.as_ref().unwrap()
+        } else {
+            &self.fallback_mask
+        };
+        pass.set_bind_group(2, &mask.bind_group, &[]);
         pass.set_bind_group(3, &uniforms.bind_group, &[offset]);
         pass.draw(0..3, 0..1);
         drop(pass);
-        std::mem::swap(&mut parent.color, output);
+        std::mem::swap(parent, output);
     }
 }
 

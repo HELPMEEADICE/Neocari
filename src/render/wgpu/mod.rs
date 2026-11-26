@@ -49,6 +49,7 @@ pub struct WgpuLive2dRenderer {
     pipeline_resources: pipeline::PipelineResources,
     legacy_pipelines: std::sync::OnceLock<pipeline::Pipelines>,
     packed_pipelines: pipeline::Pipelines,
+    group_mask_pipelines: [std::sync::OnceLock<wgpu::RenderPipeline>; 2],
     texture_bind_group_layout: wgpu::BindGroupLayout,
     transform_bind_group_layout: wgpu::BindGroupLayout,
     mask_params_bind_group_layout: wgpu::BindGroupLayout,
